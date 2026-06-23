@@ -1,0 +1,879 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\newcommand{\doi}[1]{\href{https://doi.org/#1}{doi:#1}}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!70!black,
+  urlcolor=blue!70!black,
+  citecolor=green!50!black
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  frame=single,
+  breaklines=true,
+  keywordstyle=\color{blue},
+  commentstyle=\color{green!60!black},
+  stringstyle=\color{red!70!black},
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{ERF Instrument Simulators}
+\lhead{Design Document}
+\cfoot{\thepage}
+
+\title{\textbf{Instrument Simulator Design Document}\\
+\large ERF Atmospheric Model\\
+\normalsize Ceilometer $\cdot$ Doppler Lidar $\cdot$ Microwave Radiometer}
+\author{ERF Development Team}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Overview}
+% ============================================================
+
+This document describes the physics, algorithms, and software design of three ground-based
+remote sensing instrument simulators implemented in the ERF atmospheric model.
+The simulators provide forward operators that translate model state variables into
+synthetic instrument observables, enabling direct comparison with field campaign measurements.
+
+All three simulators are implemented as header-only C++ structs in
+\texttt{Source/IO/ERF\_InstrumentSimulators.H}.
+They are activated via \texttt{ParmParse} parameters in the input file and
+written on a user-specified timestep interval.
+
+\subsection{Instruments}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Instrument} & \textbf{Make/Model} & \textbf{Wavelength} & \textbf{Primary Observables} \\
+\midrule
+Ceilometer & Vaisala CL-31 & 905\,nm & $\beta_\mathrm{att}(z,t)$, cloud base height \\
+Doppler Lidar & Halo Photonics StreamLine XR+ & 1550\,nm & $w(z,t)$, $\mathbf{U}(z,t)$, $\beta_\mathrm{att}$ \\
+MWR & Radiometrics MP-3000A & 22--58\,GHz & $T(z,t)$, $q_v(z,t)$, LWP, PWV \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Microphysics Compatibility}
+
+The backscatter forward model adapts automatically to the active microphysics scheme:
+
+\begin{itemize}
+  \item \textbf{Bulk schemes (Kessler, Morrison, SAM, SatAdj, WSM6, Null)} ---
+        Use a fixed effective radius $r_\mathrm{eff}$ with bulk LWC/IWC extracted from
+        \texttt{RhoQ2\_comp} (liquid) and \texttt{RhoQ3\_comp} (ice) in the conserved-state array
+        (Section~\ref{sec:ceil_simple}).
+  \item \textbf{SBM} (Spectral Bin Microphysics) --- Eulerian bin-resolving scheme; backscatter
+        uses per-bin number concentration $N_b$ [$\mathrm{m}^{-3}$] and bin-centre radius $r_b$,
+        identical to the \texttt{sbm\_N\_cloud} and \texttt{sbm\_reflectivity} plotfile
+        variables (Section~\ref{sec:size_resolved}).
+  \item \textbf{SDM} (Super-Droplet Method) --- Lagrangian particle-based scheme; backscatter
+        uses each super-droplet's physical radius $r_p$ and multiplicity $\xi_p$
+        (Section~\ref{sec:size_resolved}).
+\end{itemize}
+
+The MWR simulator uses only bulk thermodynamic variables and behaves identically
+for all microphysics schemes.
+
+% ============================================================
+\section{Ceilometer Simulator (Vaisala CL-31, 905\,nm)}
+% ============================================================
+
+\subsection{Instrument Description}
+
+The Vaisala CL-31 is a single-lens backscatter lidar operating at $\lambda = 905$\,nm.
+It transmits short laser pulses and measures time-gated return signals.
+The primary observable is the \textbf{attenuated backscatter} coefficient
+$\beta_\mathrm{att}(z,t)$ [$\mathrm{m}^{-1}\,\mathrm{sr}^{-1}$] as a function of height
+and time.
+
+\subsection{Simple Backscatter Forward Model (bulk schemes)}\label{sec:ceil_simple}
+
+\subsubsection{Volume Extinction Coefficient}
+
+For cloud droplets with effective radius $r_\mathrm{eff} \gg \lambda$ (geometric optics regime,
+valid for $r_\mathrm{eff} \gtrsim 5\,\mu\mathrm{m}$):
+
+\begin{equation}
+  \sigma_\mathrm{ext}(z) = \frac{3}{2}\,\frac{\mathrm{LWC}(z)}{\rho_w\,r_\mathrm{eff}(z)}
+  \quad [\mathrm{m}^{-1}]
+  \label{eq:sigma_ext_simple}
+\end{equation}
+
+\noindent where:
+\begin{align*}
+  \mathrm{LWC}(z) &= \rho_\mathrm{air}(z)\,q_c(z) \quad [\mathrm{kg\,m}^{-3}] \\
+  \rho_w &= 1000\;\mathrm{kg\,m}^{-3} \quad \text{(liquid water density)} \\
+  r_\mathrm{eff}(z) &= \frac{\int_0^\infty n(r)\,r^3\,dr}{\int_0^\infty n(r)\,r^2\,dr}
+  \quad \text{(third/second moment of size distribution)}
+\end{align*}
+
+For ice clouds the same form applies using IWC and $r_{\mathrm{eff},i}$.
+In the absence of size-distribution information (all bulk schemes),
+the defaults are $r_\mathrm{eff} = 10\,\mu\mathrm{m}$ (liquid) and
+$r_{\mathrm{eff},i} = 30\,\mu\mathrm{m}$ (ice), both user-configurable.
+
+Both liquid and ice contributions to extinction and backscatter are summed before
+applying the two-way optical depth:
+\begin{equation}
+  \sigma_\mathrm{tot}(z) = \sigma_\mathrm{liq}(z) + \sigma_\mathrm{ice}(z)
+\end{equation}
+
+\subsubsection{Volume Backscatter Coefficient}
+
+The lidar ratio $S_L$ relates backscatter to extinction:
+\begin{equation}
+  \beta(z) = \frac{\sigma_\mathrm{ext}(z)}{S_L}
+  \quad [\mathrm{m}^{-1}\,\mathrm{sr}^{-1}]
+  \label{eq:beta_simple}
+\end{equation}
+
+\noindent Adopted lidar ratio values:
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Target & Wavelength & $S_L$ \\
+\midrule
+Liquid cloud & 905\,nm  & 18.8\,sr \\
+Ice cloud    & 905\,nm  & 25.0\,sr \\
+Liquid cloud & 1550\,nm & 20.0\,sr \\
+Ice cloud    & 1550\,nm & 28.0\,sr \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{Two-Way Optical Depth and Transmission}
+
+The cumulative two-way optical depth from the surface to height $z$:
+\begin{equation}
+  \tau(z) = 2\int_0^z \sigma_\mathrm{ext}(z')\,dz'
+  \label{eq:tau}
+\end{equation}
+
+Discretized (trapezoidal rule, $k$ = vertical grid index):
+\begin{equation}
+  \tau_k = \tau_{k-1} + \bigl(\sigma_{\mathrm{tot},k} + \sigma_{\mathrm{tot},k-1}\bigr)\,\Delta z_k
+\end{equation}
+
+\subsubsection{Attenuated Backscatter}
+
+\begin{equation}
+  \boxed{\beta_\mathrm{att}(z) = \beta(z)\,\exp\bigl[-\tau(z)\bigr]}
+  \quad [\mathrm{m}^{-1}\,\mathrm{sr}^{-1}]
+  \label{eq:beta_att}
+\end{equation}
+
+This is the quantity directly observed by the ceilometer.
+
+\subsection{Size-Resolved Geometric-Optics Backscatter (SBM and SDM)}\label{sec:size_resolved}
+
+When SBM or SDM microphysics is active, the extinction coefficient is computed from the
+actual droplet/crystal size distribution using the geometric-optics limit ($Q_\mathrm{ext} = 2$,
+valid for $r \gg \lambda$, i.e.\ cloud droplets $r \gtrsim 5\,\mu\mathrm{m}$).
+The same variables and bin radii are used as in the ERF plotfile diagnostics
+(\texttt{sbm\_N\_cloud}, \texttt{sbm\_reflectivity}), ensuring consistency between
+plotfile and instrument-simulator outputs.
+
+\subsubsection{SBM Path}
+
+For each liquid (or ice) bin $b$ with bin-centre radius $r_b$ [$\mathrm{m}$] and number
+concentration $N_b$ [$\mathrm{m}^{-3}$]:
+\begin{equation}
+  \sigma_{\mathrm{ext},b}(z) = N_b(z)\cdot 2\pi r_b^2
+  \quad [\mathrm{m}^{-1}]
+  \label{eq:sigma_ext_sbm}
+\end{equation}
+\noindent where $N_b$ is read from
+\texttt{cons[RhoQ1\_comp + idx\_nc\_start + b]} (two-moment SBM, $N_b$ in $\mathrm{m}^{-3}$),
+and $r_b = \texttt{GetDiameterGridHostUM()}[b] / 2$.
+The column extinction is the sum over all 33 liquid (or ice) bins:
+\begin{equation}
+  \sigma_\mathrm{ext,liq}(z) = \sum_{b=0}^{32}\sigma_{\mathrm{ext},b}^{\mathrm{liq}}(z),
+  \qquad
+  \sigma_\mathrm{ext,ice}(z) = \sum_{b=0}^{32}\sigma_{\mathrm{ext},b}^{\mathrm{ice}}(z)
+\end{equation}
+A one-moment fallback derives $N_b$ from the mass density bin if
+\texttt{idx\_nc\_start} $< 0$.
+
+\subsubsection{SDM Path}
+
+For each super-droplet $p$ in a column $(i_\mathrm{loc}, j_\mathrm{loc})$, its contribution
+to vertical cell $k$ is accumulated on the GPU using atomic addition:
+\begin{equation}
+  \sigma_\mathrm{ext}(k) \mathrel{+}=
+  \frac{\xi_p \cdot 2\pi r_p^2}{V_\mathrm{cell}}
+  \quad [\mathrm{m}^{-1}]
+  \label{eq:sigma_ext_sdm}
+\end{equation}
+\noindent where $\xi_p$ is the multiplicity (real droplet count represented),
+$r_p$ [$\mathrm{m}$] is the physical droplet radius, and
+$V_\mathrm{cell} = \Delta x\,\Delta y\,\Delta z$ is the grid cell volume.
+The vertical index $k$ is obtained from \texttt{p.idata(ERFParticlesIntIdxAoS::k)}.
+Accumulation uses \texttt{amrex::Gpu::Atomic::AddNoRet} on a \texttt{Gpu::DeviceVector},
+followed by device-to-host copy and \texttt{MPI\_Reduce} to the IO processor.
+SDM does not separately tag liquid vs.\ ice phase; the full $\sigma_\mathrm{ext}$
+is stored in \texttt{sigma\_liq}, with \texttt{sigma\_ice} = 0.
+
+\subsubsection{Data Pathway}
+
+The pre-computed $\sigma$ columns are packaged into an \texttt{InstrMicrophySizeData}
+struct and passed to \texttt{write()} as an optional pointer:
+\begin{lstlisting}[language=c++]
+struct InstrMicrophySizeData {
+    Vector<Vector<Real>> sigma_liq;  // [site][k]  m-1
+    Vector<Vector<Real>> sigma_ice;  // [site][k]  m-1
+    bool empty() const { return sigma_liq.empty(); }
+};
+// In ERF::Evolve() -- only on write steps (avoids overhead every step):
+ceil_mpdata = fill_sbm(ilocs, jlocs);   // or fill_sdm(...)
+m_ceilometer_sim->write(..., ceil_mpdata.get());
+\end{lstlisting}
+Backscatter is computed via
+\texttt{InstrumentSimUtil::compute\_beta\_att\_from\_sigma()},
+which applies the optical-depth integral and lidar-ratio conversion
+(equations~\ref{eq:tau}--\ref{eq:beta_att}).
+When \texttt{mpdata == nullptr} (any bulk scheme), the simulator falls back to
+the simple fixed-$r_\mathrm{eff}$ model (Section~\ref{sec:ceil_simple}).
+
+% ============================================================
+\subsection{Mie Scattering Forward Model (Planned --- Not Yet Implemented)}\label{sec:mie}
+
+\textit{Note: The full Mie backscatter series is not yet implemented.
+When \texttt{backscatter\_model = mie} is specified, the code currently falls back to
+the size-resolved geometric-optics model of Section~\ref{sec:size_resolved}
+(SBM/SDM) or the bulk fixed-$r_\mathrm{eff}$ model (bulk schemes).
+The section below documents the planned Mie algorithm for future implementation.}
+
+\subsubsection{Mie Efficiency Factors}
+
+For each SBM bin $n$ with bin-center radius $r_n$ at wavelength $\lambda$, the size parameter is:
+\begin{equation}
+  x_n = \frac{2\pi r_n}{\lambda}
+\end{equation}
+
+The Mie extinction and backscatter efficiency factors $Q_\mathrm{ext}(x_n,m)$ and
+$Q_\mathrm{back}(x_n,m)$ are computed via the Bohren \& Huffman (1983) Mie series
+\cite{BohrenHuffman1983}:
+
+\begin{align}
+  Q_\mathrm{ext} &= \frac{2}{x^2}\sum_{l=1}^{N}(2l+1)\,\mathrm{Re}(a_l + b_l)
+  \label{eq:Qext_Mie} \\[6pt]
+  Q_\mathrm{back} &= \frac{1}{x^2}\left|\sum_{l=1}^{N}(2l+1)(-1)^l(a_l - b_l)\right|^2
+  \label{eq:Qback_Mie}
+\end{align}
+
+\noindent where $a_l$, $b_l$ are the Mie coefficients (complex Riccati-Bessel functions),
+$m = n_r - i n_i$ is the complex refractive index of water/ice.
+
+Refractive indices used:
+\begin{itemize}
+  \item Liquid water at 905\,nm: $m = 1.328 - 1.67\times10^{-8}i$
+  \item Liquid water at 1550\,nm: $m = 1.318 - 1.18\times10^{-4}i$
+  \item Ice at 905\,nm: $m = 1.304 - 3.65\times10^{-9}i$
+\end{itemize}
+
+These tables are precomputed at initialization using the SBM bin diameters
+from \texttt{ERF\_BinGrid.H} (\texttt{m\_diameter\_grid\_host}).
+
+\subsubsection{Column-Integrated Mie Backscatter}
+
+\begin{align}
+  \beta_\mathrm{Mie}(z) &= \sum_n N_n(z)\,\pi r_n^2\,Q_{\mathrm{back},n}
+  \quad [\mathrm{m}^{-1}\,\mathrm{sr}^{-1}]
+  \label{eq:beta_Mie} \\[4pt]
+  \sigma_\mathrm{Mie}(z) &= \sum_n N_n(z)\,\pi r_n^2\,Q_{\mathrm{ext},n}
+  \quad [\mathrm{m}^{-1}]
+  \label{eq:sigma_Mie}
+\end{align}
+
+\noindent where $N_n(z)$ [$\mathrm{m}^{-3}$] is the number concentration in bin $n$ at height $z$.
+The attenuated backscatter is then:
+\begin{equation}
+  \beta_\mathrm{att}(z) = \beta_\mathrm{Mie}(z)\,\exp\!\left(-2\int_0^z \sigma_\mathrm{Mie}(z')\,dz'\right)
+\end{equation}
+
+\subsubsection{SDM (Lagrangian) Adaptation}
+
+For SDM, at each grid cell $(i,j,k)$ the super-droplet radii are histogrammed into
+a temporary array matching the SBM bin grid. The number concentration per bin is estimated as:
+\begin{equation}
+  N_n = \frac{1}{V_\mathrm{cell}}\sum_{p\,:\,r_p \in [r_n^-, r_n^+]} \xi_p
+\end{equation}
+where $\xi_p$ is the multiplicity (real droplet count) of super-droplet $p$,
+and $V_\mathrm{cell}$ is the grid cell volume.
+
+\subsection{Cloud Base Detection}
+
+Cloud base height is the lowest level where $\beta_\mathrm{att}$ exceeds a threshold:
+\begin{equation}
+  z_\mathrm{cb} = \min\{z : \beta_\mathrm{att}(z) > \beta_\mathrm{thresh}\}
+\end{equation}
+
+Default: $\beta_\mathrm{thresh} = 3\times10^{-4}\,\mathrm{m}^{-1}\,\mathrm{sr}^{-1}$.
+Output is $-9999$ if no cloud is detected.
+
+% ============================================================
+\section{Doppler Lidar Simulator (Halo StreamLine XR+, 1550\,nm)}
+% ============================================================
+
+\subsection{Instrument Description}
+
+The Halo Photonics StreamLine XR+ is a coherent pulsed Doppler lidar at $\lambda=1550$\,nm.
+It operates in multiple scan modes:
+\begin{itemize}
+  \item \textbf{Vertical stare}: beam pointing zenith, measures $w(z,t)$ and CNR$(z,t)$
+  \item \textbf{VAD scan}: conical scan at fixed elevation angle, retrieves $u(z,t)$, $v(z,t)$
+  \item \textbf{Attenuated backscatter}: passive measurement of $\beta_\mathrm{att}(z,t)$
+\end{itemize}
+Each mode is controlled independently via input parameters.
+
+\subsection{Vertical Stare Mode}
+
+For a zenith-pointing beam, the radial (Doppler) velocity equals the vertical wind component:
+\begin{equation}
+  V_r(z) = w(z) \quad [\mathrm{m\,s}^{-1}]
+\end{equation}
+
+The cell-centred vertical velocity is the average of the two enclosing face values:
+$w_k = \tfrac{1}{2}(w_{k-1/2} + w_{k+1/2})$.
+
+\subsubsection{CNR Model Selection (\texttt{cnr\_model})}
+
+The Carrier-to-Noise Ratio (CNR) is output alongside $w(z,t)$ in the vertical-stare file.
+Two models are available.
+
+\paragraph{Normalized model (default, \texttt{cnr\_model = normalized})}
+
+A dimensionless range-normalized proxy convenient for qualitative comparison:
+\begin{equation}
+  \mathrm{CNR}(r) = \frac{\beta_\mathrm{att}(r)}{r^2}
+  \label{eq:cnr_normalized}
+\end{equation}
+This requires \texttt{do\_backscatter = true} to supply $\beta_\mathrm{att}$;
+otherwise CNR is output as zero.
+
+\paragraph{Physical model (\texttt{cnr\_model = physical})}
+
+Based on the coherent Doppler lidar performance equation of Targ et al.\ (1991)
+\cite{Targ1991}.  The CNR is related to the attenuated backscatter through the
+instrument function $F(r)$:
+
+\begin{equation}
+  \boxed{\mathrm{CNR}(r) = F(r)\;\beta_\mathrm{att}(r)}
+  \label{eq:cnr_physical}
+\end{equation}
+
+where
+\begin{equation}
+  F(r) = \frac{E\,\eta\,\lambda\,\pi\,\omega^2}{2\,h\,B_w\,r^2}
+  \cdot\underbrace{\left[1 + \left(1-\frac{r}{R}\right)^2
+    \!\left(\frac{\pi\omega^2}{\lambda r}\right)^{\!2}\right]^{-1}}_{\text{Gaussian beam focus correction}}
+  \label{eq:F_targ}
+\end{equation}
+
+\noindent The parameters are:
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+Symbol    & Parameter name            & Meaning                                   & Default (Halo XR+) \\
+\midrule
+$E$       & \texttt{pulse\_energy}    & Pulse energy [J]                          & $1.5\times10^{-6}$\,J \\
+$\eta$    & \texttt{optics\_efficiency}& Optical + detector efficiency [-]        & 0.1 \\
+$\lambda$ & ---                       & Wavelength [m] (fixed)                    & $1.55\times10^{-6}$\,m \\
+$\omega$  & \texttt{beam\_radius}     & $1/e^2$ beam radius at aperture [m]       & 0.0225\,m \\
+$h$       & ---                       & Planck constant [J\,s] (fixed)            & $6.626\times10^{-34}$\,J\,s \\
+$B_w$     & \texttt{bandwidth}        & Receiver noise bandwidth [Hz]             & $50\times10^6$\,Hz \\
+$R$       & \texttt{focus\_range}     & Radius of curvature at aperture [m]       & $10^9$\,m (collimated) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The factor $\pi\omega^2/(\lambda r)$ is the Rayleigh-range-to-range ratio.
+The focus correction equals 1 when $r = R$ (beam focused at range $R$) and
+approaches 1 everywhere for a collimated beam ($R \to \infty$).
+
+\subsection{VAD (Velocity-Azimuth Display) Mode}
+
+\subsubsection{Radial Velocity Simulation}
+
+For a beam at elevation angle $\phi$ from horizontal and azimuth $\psi$ (clockwise from North),
+the beam unit vector in East-North-Up coordinates is:
+\begin{equation}
+  \hat{d} = (\cos\phi\cos\psi,\;\cos\phi\sin\psi,\;\sin\phi)
+\end{equation}
+
+The simulated radial velocity (projection of wind onto beam):
+\begin{equation}
+  \boxed{V_r(\psi, z) = u(z)\cos\phi\cos\psi + v(z)\cos\phi\sin\psi + w(z)\sin\phi}
+  \label{eq:vad_radial}
+\end{equation}
+
+Sampled at $N_\psi = 36$ azimuths: $\psi_m = m \times 10^\circ$, $m = 0, 1, \ldots, 35$.
+Cell-centred $u$ and $v$ are computed by averaging the two enclosing face values.
+
+\subsubsection{VAD Retrieval}
+
+The radial velocity field is modeled as a truncated Fourier series in azimuth:
+\begin{equation}
+  V_r(\psi, z) \approx A_0(z) + A_1(z)\cos\psi + B_1(z)\sin\psi
+  \label{eq:vad_fit}
+\end{equation}
+
+Coefficients are determined by least-squares fit over the $N_\psi$ azimuths.
+The horizontal wind components are retrieved as:
+\begin{align}
+  w(z) &= A_0(z)/\sin\phi \label{eq:vad_w} \\
+  u(z) &= A_1(z)/\cos\phi \label{eq:vad_u} \\
+  v(z) &= B_1(z)/\cos\phi \label{eq:vad_v}
+\end{align}
+
+Horizontal wind speed and meteorological wind direction:
+\begin{align}
+  |V_h|(z) &= \sqrt{u(z)^2 + v(z)^2} \\
+  \mathrm{WD}(z) &= \mathrm{atan2}(-u,-v)\times\frac{180}{\pi} + 180
+  \quad [\text{degrees, meteorological convention}]
+\end{align}
+
+\subsection{Attenuated Backscatter at 1550\,nm}
+
+Same forward model as the ceilometer (\autoref{eq:sigma_ext_simple}--\ref{eq:beta_att})
+but with $\lambda = 1550$\,nm lidar ratios ($S_L = 20$\,sr for liquid, $28$\,sr for ice).
+Both liquid and ice cloud contributions are included:
+\begin{equation}
+  \beta_\mathrm{att}(z) = \bigl[\beta_\mathrm{liq}(z) + \beta_\mathrm{ice}(z)\bigr]\,
+  \exp\!\left(-\tau_\mathrm{liq}(z) - \tau_\mathrm{ice}(z)\right)
+\end{equation}
+
+% ============================================================
+\section{Microwave Radiometer Simulator (Radiometrics MP-3000A)}
+% ============================================================
+
+\subsection{Instrument Description}
+
+The Radiometrics MP-3000A is a passive microwave radiometer with 35 channels:
+\begin{itemize}
+  \item \textbf{K-band}: 22 channels from 22.235 to 40.0\,GHz --- water vapor absorption
+  \item \textbf{V-band}: 13 channels from 51.25 to 58.0\,GHz --- oxygen absorption complex
+\end{itemize}
+
+The instrument retrieves temperature profiles, water vapor profiles, LWP, and PWV using
+neural network algorithms applied to observed brightness temperatures.
+
+\subsection{Direct Profile Output}
+
+\subsubsection{Temperature Profile}
+
+Model potential temperature $\theta$ is converted to absolute temperature via the Exner function:
+\begin{align}
+  T(z) &= \theta(z)\,\Pi(z) \label{eq:exner_T} \\
+  \Pi(z) &= \left(\frac{p(z)}{p_0}\right)^{R_d/c_p} \label{eq:exner}
+\end{align}
+
+\noindent where:
+\begin{align*}
+  \theta(z) &= (\rho\theta)(z) / \rho(z) \quad\text{from state array}\\
+  p(z) &= p_0(z) \quad\text{(base-state pressure, 1D column)}\\
+  p_0 &= 10^5\;\mathrm{Pa} \quad\text{(reference pressure)}\\
+  R_d &= 287.04\;\mathrm{J\,kg}^{-1}\mathrm{K}^{-1} \\
+  c_p &= 1004.5\;\mathrm{J\,kg}^{-1}\mathrm{K}^{-1}
+\end{align*}
+
+\subsubsection{Water Vapor and Cloud Liquid Profiles}
+
+\begin{align}
+  q_v(z) &= \frac{(\rho q_v)(z)}{\rho(z)}
+  = \frac{\mathtt{state}(i,j,k,\,\text{RhoQ1\_comp})}{\mathtt{state}(i,j,k,\,\text{Rho\_comp})}
+  \quad [\mathrm{kg\,kg}^{-1}] \\[4pt]
+  q_c(z) &= \frac{(\rho q_c)(z)}{\rho(z)}
+  = \frac{\mathtt{state}(i,j,k,\,\text{RhoQ2\_comp})}{\mathtt{state}(i,j,k,\,\text{Rho\_comp})}
+  \quad [\mathrm{kg\,kg}^{-1}]
+\end{align}
+
+Both $q_v$ and $q_c$ are output in $\mathrm{g\,kg}^{-1}$ in the profile file.
+
+\subsubsection{Column Integrals}
+
+Liquid Water Path (LWP):
+\begin{equation}
+  \mathrm{LWP} = \int_0^{z_\mathrm{top}} \rho(z)\,q_c(z)\,dz
+  \approx \sum_k \rho_k\,q_{c,k}\,\Delta z_k
+  \quad [\mathrm{kg\,m}^{-2}]
+  \label{eq:lwp}
+\end{equation}
+Output in $\mathrm{g\,m}^{-2}$ (multiply by 1000).
+
+Precipitable Water Vapor (PWV):
+\begin{equation}
+  \mathrm{PWV} = \frac{1}{\rho_w}\int_0^{z_\mathrm{top}} \rho(z)\,q_v(z)\,dz
+  \approx \frac{1}{\rho_w}\sum_k \rho_k\,q_{v,k}\,\Delta z_k
+  \quad [\mathrm{mm}]
+  \label{eq:pwv}
+\end{equation}
+
+\noindent where $\rho_w = 1000\;\mathrm{kg\,m}^{-3}$ and the result in mm equals
+the column integral in $\mathrm{kg\,m}^{-2}$ (numerically).
+
+\subsection{Brightness Temperature Forward Model (Optional)}
+
+\subsubsection{Gaseous Absorption}
+
+The total volume absorption coefficient at frequency $f$ [GHz] and height $z$ is:
+\begin{equation}
+  \alpha(f, z) = \alpha_{\mathrm{H_2O}}(f, T, p, \rho_v)
+               + \alpha_{\mathrm{O_2}}(f, T, p)
+               + \alpha_{\mathrm{liq}}(f, T, \mathrm{LWC})
+  \quad [\mathrm{Np\,m}^{-1}]
+\end{equation}
+
+\paragraph{Water vapor absorption (K-band)}
+Simplified Rosenkranz (1998) model \cite{Rosenkranz1998} with dominant line at 22.235\,GHz
+plus a continuum term.  The Van Vleck-Weisskopf lineshape is:
+\begin{equation}
+  F_i(f) = \frac{f}{f_0}\left[\frac{\gamma}{(f-f_0)^2+\gamma^2}
+                               + \frac{\gamma}{(f+f_0)^2+\gamma^2}\right]
+\end{equation}
+Line width $\gamma$ depends on pressure and water vapor density following
+Rosenkranz (1998) Table~1.
+
+\paragraph{Oxygen absorption (V-band)}
+Simplified Liebe et al.\ (1993) \cite{Liebe1993} oxygen complex.
+Thirty dominant lines from 50.474 to 66.302\,GHz are summed with pressure-broadened
+Van Vleck-Weisskopf profiles and line strengths scaled as $\theta^3\,p$.
+
+\paragraph{Liquid water absorption}
+Rayleigh approximation valid for $f \ll 300$\,GHz:
+\begin{equation}
+  \alpha_\mathrm{liq}(f) = \frac{6\pi f}{c}\,
+  \frac{3\,\varepsilon''}{(\varepsilon_r + 2)^2 + (\varepsilon'')^2}\,
+  \frac{\mathrm{LWC}}{\rho_w}
+  \label{eq:alpha_liq}
+\end{equation}
+
+\noindent The complex permittivity $\varepsilon = \varepsilon_r - i\varepsilon''$ of liquid water
+uses the Ellison (2007) double-Debye parameterization \cite{Ellison2007}.
+
+\subsubsection{Radiative Transfer}
+
+For zenith-pointing geometry, the upwelling brightness temperature is:
+\begin{equation}
+  \boxed{T_B(f) = T_\mathrm{bg}\,e^{-\tau_\mathrm{tot}(f)}
+  + \int_0^\infty T(z)\,\alpha(f,z)\,
+  e^{-\tau(f,\,0,\,z)}\,dz}
+  \label{eq:RT}
+\end{equation}
+
+\noindent where:
+\begin{align*}
+  T_\mathrm{bg} &= 2.75\;\mathrm{K} \quad\text{(cosmic microwave background)} \\
+  \tau(f, z_1, z_2) &= \int_{z_1}^{z_2}\alpha(f,z')\,dz' \\
+  \tau_\mathrm{tot}(f) &= \tau(f, 0, \infty)
+\end{align*}
+
+Discrete form (summed over $K$ vertical levels, $\tau_k$ = optical depth from surface to $z_k$):
+\begin{equation}
+  T_B(f) \approx T_\mathrm{bg}\,e^{-\tau_K}
+  + \sum_{k=1}^{K} T_k\,\bigl(e^{-\tau_{k-1}} - e^{-\tau_k}\bigr)
+\end{equation}
+
+\subsubsection{MP-3000A Channel Frequencies}
+
+\begin{center}
+\begin{tabular}{rl|rl}
+\toprule
+\multicolumn{2}{c|}{\textbf{K-band (22 channels)}} &
+\multicolumn{2}{c}{\textbf{V-band (13 channels)}} \\
+Ch & $f$ [GHz] & Ch & $f$ [GHz] \\
+\midrule
+1  & 22.235 & 23 & 51.250 \\
+2  & 22.500 & 24 & 51.760 \\
+3  & 23.035 & 25 & 52.280 \\
+4  & 23.835 & 26 & 52.800 \\
+5  & 25.000 & 27 & 53.340 \\
+6  & 26.235 & 28 & 53.860 \\
+7  & 28.000 & 29 & 54.400 \\
+8  & 30.000 & 30 & 54.940 \\
+9  & 31.400 & 31 & 55.500 \\
+10 & 32.000 & 32 & 56.020 \\
+11 & 32.400 & 33 & 56.660 \\
+12 & 33.000 & 34 & 57.290 \\
+13 & 34.000 & 35 & 58.000 \\
+14 & 35.000 & & \\
+15 & 36.000 & & \\
+16 & 36.500 & & \\
+17 & 37.000 & & \\
+18 & 37.500 & & \\
+19 & 38.000 & & \\
+20 & 38.600 & & \\
+21 & 39.500 & & \\
+22 & 40.000 & & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ============================================================
+\section{Input File Parameters}
+% ============================================================
+
+All parameters use the \texttt{erf.*} ParmParse prefix.
+Multiple instrument sites can be specified by providing equal-length lists for
+\texttt{i\_loc} and \texttt{j\_loc}; indices are 0-based cell indices.
+
+\begin{lstlisting}[language=bash,caption={Ceilometer input parameters (defaults shown)}]
+# Ceilometer (Vaisala CL-31, 905 nm)
+erf.ceilometer.do_sim             = true
+erf.ceilometer.i_loc              = 32 48    # REQUIRED; 0-based i indices (list OK)
+erf.ceilometer.j_loc              = 32 48    # REQUIRED; must match i_loc count
+erf.ceilometer.output_interval    = 10       # write every N timesteps
+erf.ceilometer.output_file        = ceil_    # prefix; ceil_00.txt, ceil_01.txt, ...
+erf.ceilometer.backscatter_model  = simple   # "simple" (geometric optics) or "mie"
+erf.ceilometer.r_eff_default      = 1.0e-5  # m; liquid effective radius fallback
+erf.ceilometer.r_eff_ice_default  = 3.0e-5  # m; ice effective radius fallback
+erf.ceilometer.beta_thresh        = 3.0e-4  # m-1 sr-1; cloud base detection threshold
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash,caption={Doppler Lidar input parameters (defaults shown)}]
+# Doppler Lidar (Halo StreamLine XR+, 1550 nm)
+erf.doppler_lidar.do_sim              = true
+erf.doppler_lidar.i_loc               = 32      # REQUIRED; one or more sites
+erf.doppler_lidar.j_loc               = 32      # REQUIRED
+erf.doppler_lidar.output_interval     = 10
+erf.doppler_lidar.output_file         = dl_
+erf.doppler_lidar.backscatter_model   = simple  # "simple" or "mie"
+erf.doppler_lidar.r_eff_default       = 1.0e-5  # m; liquid effective radius fallback
+erf.doppler_lidar.do_vertical_stare   = true    # output w(z,t) and CNR  [default: true]
+erf.doppler_lidar.do_vad              = false   # output u,v,wind speed/dir [default: false]
+erf.doppler_lidar.vad_elevation_angle = 75.0    # degrees from horizontal
+erf.doppler_lidar.do_backscatter      = false   # output beta_att(z,t)  [default: false]
+# CNR model for vertical stare output:
+erf.doppler_lidar.cnr_model           = normalized  # "normalized" (default) or "physical"
+# Physical CNR parameters (Targ 1991) -- only used when cnr_model = physical:
+erf.doppler_lidar.pulse_energy        = 1.5e-6  # E   [J]
+erf.doppler_lidar.optics_efficiency   = 0.1     # eta [-]
+erf.doppler_lidar.beam_radius         = 0.0225  # omega [m]  1/e^2 beam radius
+erf.doppler_lidar.bandwidth           = 50.0e6  # Bw  [Hz]  receiver bandwidth
+erf.doppler_lidar.focus_range         = 1.0e9   # R   [m]   (1e9 = collimated)
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash,caption={MWR input parameters (defaults shown)}]
+# MWR (Radiometrics MP-3000A, 35 channels)
+erf.mwr.do_sim             = true
+erf.mwr.i_loc              = 32      # REQUIRED
+erf.mwr.j_loc              = 32      # REQUIRED
+erf.mwr.output_interval    = 10
+erf.mwr.output_file        = mwr_
+erf.mwr.do_brightness_temp = false   # true = also write simulated TB (35 channels)
+\end{lstlisting}
+
+% ============================================================
+\section{Output File Formats}
+% ============================================================
+
+All output files are ASCII text with comment headers (\texttt{\#} prefix lines).
+Time rows are appended at each write interval.
+
+\subsection{Ceilometer: \texttt{ceil\_XX.txt}}
+\begin{lstlisting}
+# ERF Ceilometer Simulator (Vaisala CL-31, 905 nm)
+# i_loc=32  j_loc=32
+# backscatter_model=simple
+# Col 1: time [s]
+# Col 2: height [m]
+# Col 3: att_backscatter [m-1 sr-1]
+# Col 4: cloud_base_height [m]  (-9999 = no cloud)
+  1.000000e+01  2.500000e+01  1.234000e-06  2.500000e+02
+  1.000000e+01  7.500000e+01  3.456000e-04  2.500000e+02
+\end{lstlisting}
+
+\subsection{Doppler Lidar Stare: \texttt{dl\_XX\_stare.txt}}
+\begin{lstlisting}
+# ERF Doppler Lidar Simulator (Halo XR+, 1550 nm) -- vertical stare
+# i_loc=32  j_loc=32
+# cnr_model=normalized  (CNR = beta_att / r^2)
+# Col 1: time [s],  Col 2: height [m]
+# Col 3: w [m s-1],  Col 4: CNR [-]
+  1.000000e+01  2.500000e+01  1.230000e-01  4.560000e-03
+\end{lstlisting}
+
+\subsection{Doppler Lidar VAD: \texttt{dl\_XX\_vad.txt}}
+\begin{lstlisting}
+# ERF Doppler Lidar Simulator -- VAD mode (elev=75.0 deg, 36 azimuths)
+# Col 1: time [s],  Col 2: height [m]
+# Col 3: u [m s-1],  Col 4: v [m s-1]
+# Col 5: wind_speed [m s-1],  Col 6: wind_dir [deg, met convention]
+\end{lstlisting}
+
+\subsection{Doppler Lidar Backscatter: \texttt{dl\_XX\_beta.txt}}
+\begin{lstlisting}
+# ERF Doppler Lidar Simulator -- att. backscatter (1550 nm)
+# Col 1: time [s],  Col 2: height [m],  Col 3: beta_att [m-1 sr-1]
+\end{lstlisting}
+
+\subsection{MWR Profiles: \texttt{mwr\_XX\_profiles.txt}}
+\begin{lstlisting}
+# ERF MWR Simulator (Radiometrics MP-3000A)
+# Col 1: time [s],  Col 2: height [m]
+# Col 3: T [K],  Col 4: qv [g kg-1],  Col 5: qc [g kg-1]
+\end{lstlisting}
+
+\subsection{MWR Column Integrals: \texttt{mwr\_XX\_column.txt}}
+\begin{lstlisting}
+# ERF MWR Simulator -- column integrals
+# Col 1: time [s],  Col 2: LWP [g m-2],  Col 3: PWV [mm]
+  1.000000e+01  2.534000e+01  1.872000e+01
+\end{lstlisting}
+
+\subsection{MWR Brightness Temperatures: \texttt{mwr\_XX\_tb.txt} (optional)}
+\begin{lstlisting}
+# ERF MWR Simulator -- simulated brightness temperatures (35 channels)
+# Col 1: time [s],  Col 2: frequency [GHz],  Col 3: TB [K]
+  1.000000e+01  2.223500e+01  2.654300e+02
+  1.000000e+01  2.250000e+01  2.671200e+02
+  ...  (35 rows per timestep)
+\end{lstlisting}
+
+% ============================================================
+\section{Software Architecture}
+% ============================================================
+
+\subsection{Source File}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+File & Purpose \\
+\midrule
+\texttt{Source/IO/ERF\_InstrumentSimulators.H} & Header-only: all three simulator structs \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Modified Files}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+File & Change \\
+\midrule
+\texttt{Source/ERF.H} & Add \texttt{unique\_ptr} members + method declarations \\
+\texttt{Source/ERF.cpp} & Initialize in \texttt{InitData()}, call in \texttt{Evolve()} and \texttt{post\_timestep()} \\
+\texttt{Source/IO/Make.package} & Add \texttt{ERF\_InstrumentSimulators.H} to \texttt{CEXE\_headers} \\
+\texttt{CMake/BuildERFExe.cmake} & Add \texttt{ERF\_InstrumentSimulators.H} to target sources \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Design Pattern}
+
+The simulator structs follow the \texttt{LineSampler} / \texttt{PlaneSampler} pattern in
+\texttt{Source/IO/ERF\_SampleData.H}:
+\begin{itemize}
+  \item \texttt{init()} reads \texttt{ParmParse} parameters and opens output files.
+  \item \texttt{write()} checks interval, extracts z-columns from MultiFabs at the
+        requested $(i,j)$ location(s), computes derived quantities, and writes ASCII output.
+  \item Column extraction is GPU-safe: \texttt{InstrumentSimUtil::extract\_column()} and
+        \texttt{extract\_face\_column()} use \texttt{amrex::ParallelFor} on the device
+        followed by device-to-host copy and \texttt{MPI\_Reduce} to the IO processor.
+  \item All file I/O is guarded by \texttt{ParallelDescriptor::IOProcessor()}.
+  \item The optional \texttt{InstrMicrophySizeData*} argument to the ceilometer and
+        Doppler lidar \texttt{write()} functions carries pre-computed SBM or SDM
+        extinction columns; \texttt{nullptr} invokes the bulk fixed-$r_\mathrm{eff}$ path.
+\end{itemize}
+
+\subsection{Variable Access Summary}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Quantity & ERF Access & Notes \\
+\midrule
+$\rho$ & \texttt{cons(i,j,k,Rho\_comp)} & \\
+$\rho\theta$ & \texttt{cons(i,j,k,RhoTheta\_comp)} & \\
+$\rho q_v$ & \texttt{cons(i,j,k,RhoQ1\_comp)} & \\
+$\rho q_c$ & \texttt{cons(i,j,k,RhoQ2\_comp)} & bulk liquid (all schemes) \\
+$\rho q_i$ & \texttt{cons(i,j,k,RhoQ3\_comp)} & bulk ice (guarded by \texttt{nComp()}) \\
+$u$ & \texttt{xvel(i,j,k)} & face-centred; averaged for cell-centre \\
+$v$ & \texttt{yvel(i,j,k)} & face-centred; averaged for cell-centre \\
+$w$ & \texttt{zvel(i,j,k)} & face-centred; averaged for cell-centre \\
+$p_0(z)$ & \texttt{base\_state(i,j,k,BaseState::p0\_comp)} & 1D base pressure \\
+SBM $N_b$ & \texttt{cons[RhoQ1\_comp + idx\_nc\_start + b]} & two-moment, $[\mathrm{m}^{-3}]$ \\
+SBM $r_b$ & \texttt{GetDiameterGridHostUM()[b] / 2} & precomputed table, $[\mathrm{m}]$ \\
+SDM $r_p$ & \texttt{soa.GetRealData(rtoff\_r + radius)[p]} & per-particle radius $[\mathrm{m}]$ \\
+SDM $\xi_p$ & \texttt{soa.GetRealData(rtoff\_r + multiplicity)[p]} & multiplicity $[-]$ \\
+SDM $k_p$ & \texttt{p.idata(ERFParticlesIntIdxAoS::k)} & vertical cell index \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ============================================================
+\section{Verification and Testing}
+% ============================================================
+
+\begin{enumerate}
+  \item \textbf{Build}: CMake build with \texttt{-DERF\_ENABLE\_MPI=ON} from an
+        out-of-source build directory --- should complete without new warnings.
+  \item \textbf{Functional}: Add an instrument block to any moist test input file
+        (e.g., \texttt{Exec/RegTests/Bomex/inputs\_Bomex}), run 100 steps,
+        verify output files exist with monotonically increasing time values.
+  \item \textbf{Physics sanity}:
+  \begin{itemize}
+    \item $\beta_\mathrm{att}$ peaks in the cloud layer and attenuates above it.
+    \item Ceilometer cloud base matches visual inspection of $q_c(z)$ profiles.
+    \item Doppler lidar $w$ shows sign-changing turbulence in the boundary layer.
+    \item LWP from MWR $\approx \sum_k (\rho q_c)_k \Delta z_k$ (computed independently).
+    \item MWR $T(z)$ at the surface matches soundings and initial conditions.
+  \end{itemize}
+  \item \textbf{Microphysics sweep}: Run the same thermodynamic sounding with
+        (a)~a bulk scheme (e.g., Kessler or Morrison) and (b)~SBM or SDM;
+        compare $\beta_\mathrm{att}$ and LWP time series.
+        Bulk results should be smooth functions of LWC; SBM/SDM results will differ
+        in cloud-base onset timing and magnitude but should integrate to similar LWP.
+\end{enumerate}
+
+% ============================================================
+\begin{thebibliography}{99}
+\bibitem{Targ1991}
+  R.~Targ, M.~J.\ Kavaya, R.~M.\ Huffaker, and R.~L.\ Bowles,
+  ``Coherent lidar airborne windshear sensor: performance evaluation,''
+  \emph{Appl.\ Opt.}, 30(15), 2013--2026, 1991.
+  \doi{10.1364/AO.30.002013}
+\bibitem{BohrenHuffman1983}
+  C.~F.\ Bohren and D.~R.\ Huffman,
+  \emph{Absorption and Scattering of Light by Small Particles},
+  Wiley-VCH, 1983.
+\bibitem{Rosenkranz1998}
+  P.~W.\ Rosenkranz,
+  ``Water vapor microwave continuum absorption: A comparison of measurements and models,''
+  \emph{Radio Sci.}, 33, 919--928, 1998.
+\bibitem{Liebe1993}
+  H.~J.\ Liebe, G.~A.\ Hufford, and M.~G.\ Cotton,
+  ``Propagation modeling of moist air and suspended water/ice particles at frequencies below 1000 GHz,''
+  \emph{Proc. AGARD}, 52nd Specialists' Meeting, 1993.
+\bibitem{Ellison2007}
+  W.~J.\ Ellison,
+  ``Permittivity of Pure Water, at Standard Atmospheric Pressure, over the Frequency Range
+  0--25 THz and the Temperature Range 0--100\,$^\circ$C,''
+  \emph{J.\ Phys.\ Chem.\ Ref.\ Data}, 36(1), 1--18, 2007.
+\end{thebibliography}
+
+\end{document}

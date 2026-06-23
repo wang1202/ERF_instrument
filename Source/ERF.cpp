@@ -917,6 +917,148 @@ ERF::post_timestep (int nstep, double time, Real dt_lev0)
         plane_sampler->write_sample_data(t_new, istep, ref_ratio, geom);
     }
 
+    // Write instrument simulator data (ceilometer, Doppler lidar, MWR)
+    // Moisture variables (qv=RhoQ1_comp, qc=RhoQ2_comp, qi=RhoQ3_comp) live in vars_new[0][Vars::cons]
+
+    // Pre-compute size-resolved sigma_ext for backscatter when SDM is active.
+    // Only computed on write steps to avoid overhead on every timestep.
+    const bool ceil_write  = m_ceilometer_sim  && m_ceilometer_sim->is_write_step(nstep);
+    const bool dl_write    = m_doppler_lidar_sim && m_doppler_lidar_sim->is_write_step(nstep);
+    const bool need_sigma  = ceil_write || dl_write;
+
+#ifdef ERF_USE_PARTICLES
+    const bool use_sdm = (solverChoice.moisture_type == MoistureType::SuperDroplets);
+#else
+    const bool use_sdm = false;
+#endif
+
+    std::unique_ptr<InstrMicrophySizeData> ceil_mpdata;
+    std::unique_ptr<InstrMicrophySizeData> dl_mpdata;
+
+#ifdef ERF_USE_PARTICLES
+    if (need_sigma && use_sdm) {
+        // SDM: accumulate sigma = Σ_SD xi * 2π r² / V_cell per vertical column.
+        // Geometric-optics limit (Q_ext=2) for r >> λ.
+        auto* lmicro = static_cast<LagrangianMicrophysics*>(micro.get());
+        ERFPC* pc = lmicro->getParticleContainer();
+
+        const amrex::Box& dom0 = geom[0].Domain();
+        int klo = dom0.smallEnd(2), khi = dom0.bigEnd(2), nz = khi - klo + 1;
+        const auto& dx_arr  = geom[0].CellSizeArray();
+        const auto& plo_arr = geom[0].ProbLoArray();
+        amrex::Real V_cell  = dx_arr[0] * dx_arr[1] * dx_arr[2];
+
+        int rtoff_r = SDPCDefn::SuperDropletsRealIdxSoA_RT::ncomps;
+        int rtoff_i = SDPCDefn::SuperDropletsIntIdxSoA_RT::ncomps;
+
+        auto fill_sdm = [&](const amrex::Vector<int>& ilocs,
+                            const amrex::Vector<int>& jlocs)
+            -> std::unique_ptr<InstrMicrophySizeData>
+        {
+            int ns = static_cast<int>(ilocs.size());
+            auto mpd = std::make_unique<InstrMicrophySizeData>();
+            mpd->sigma_liq.assign(ns, amrex::Vector<amrex::Real>(nz, 0.0));
+            mpd->sigma_ice.assign(ns, amrex::Vector<amrex::Real>(nz, 0.0));
+            for (int s = 0; s < ns; ++s) {
+                int iloc_s = ilocs[s], jloc_s = jlocs[s];
+                amrex::Gpu::DeviceVector<amrex::Real> sigma_d(nz, 0.0);
+                amrex::Real* sigma_ptr = sigma_d.data();
+
+                for (ERFPC::ParIterType pti(*pc, 0); pti.isValid(); ++pti) {
+                    const auto& tile  = pti.GetParticleTile();
+                    const auto& aos   = tile.GetArrayOfStructs();
+                    const auto& soa   = tile.GetStructOfArrays();
+                    int np = tile.numParticles();
+                    if (np == 0) { continue; }
+
+                    const auto* aos_ptr = aos().data();
+                    const amrex::Real* rad_d  = soa.GetRealData(
+                        rtoff_r + SDPCDefn::SuperDropletsRealIdxSoA_RT::radius).data();
+                    const amrex::Real* mult_d = soa.GetRealData(
+                        rtoff_r + SDPCDefn::SuperDropletsRealIdxSoA_RT::multiplicity).data();
+                    const int* active_d = soa.GetIntData(
+                        rtoff_i + SDPCDefn::SuperDropletsIntIdxSoA_RT::active).data();
+
+                    amrex::Real dx0 = dx_arr[0], dx1 = dx_arr[1];
+                    amrex::Real plo0 = plo_arr[0], plo1 = plo_arr[1];
+                    amrex::Real Vc = V_cell;
+                    int klo_l = klo, khi_l = khi;
+
+                    amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE (int n) noexcept {
+                        if (!active_d[n]) { return; }
+                        const auto& p = aos_ptr[n];
+                        int pi = static_cast<int>(
+                            amrex::Math::floor((p.pos(0) - plo0) / dx0));
+                        int pj = static_cast<int>(
+                            amrex::Math::floor((p.pos(1) - plo1) / dx1));
+                        if (pi != iloc_s || pj != jloc_s) { return; }
+                        int pk = static_cast<int>(amrex::Math::floor((p.pos(2) - plo_arr[2]) / dx_arr[2]));
+                        if (pk < klo_l || pk > khi_l) { return; }
+                        amrex::Real xi = mult_d[n];
+                        amrex::Real r  = rad_d[n];
+                        amrex::Gpu::Atomic::AddNoRet(
+                            &sigma_ptr[pk - klo_l],
+                            2.0 * ERF_INSTR_PI * r * r * xi / Vc);
+                    });
+                    amrex::Gpu::streamSynchronize();
+                }
+
+                // Copy device → host and MPI reduce to IO rank
+                amrex::Vector<amrex::Real> sigma_h(nz, 0.0);
+                amrex::Gpu::copy(amrex::Gpu::deviceToHost,
+                                 sigma_d.begin(), sigma_d.end(), sigma_h.begin());
+                amrex::ParallelDescriptor::ReduceRealSum(
+                    sigma_h.data(), nz,
+                    amrex::ParallelDescriptor::IOProcessorNumber());
+                mpd->sigma_liq[s] = sigma_h; // SDM doesn't separate liquid/ice phases
+            }
+            return mpd;
+        };
+
+        if (ceil_write) {
+            amrex::Vector<int> ilocs, jlocs;
+            for (int s = 0; s < m_ceilometer_sim->NSites(); ++s) {
+                ilocs.push_back(m_ceilometer_sim->ILoc(s));
+                jlocs.push_back(m_ceilometer_sim->JLoc(s));
+            }
+            ceil_mpdata = fill_sdm(ilocs, jlocs);
+        }
+        if (dl_write) {
+            amrex::Vector<int> ilocs, jlocs;
+            for (int s = 0; s < m_doppler_lidar_sim->NSites(); ++s) {
+                ilocs.push_back(m_doppler_lidar_sim->ILoc(s));
+                jlocs.push_back(m_doppler_lidar_sim->JLoc(s));
+            }
+            dl_mpdata = fill_sdm(ilocs, jlocs);
+        }
+    }
+#endif // ERF_USE_PARTICLES
+
+    if (m_ceilometer_sim) {
+        m_ceilometer_sim->write(0, t_new[0], nstep,
+                                vars_new[0][Vars::cons],
+                                vars_new[0][Vars::cons],
+                                geom[0],
+                                ceil_mpdata.get());
+    }
+    if (m_doppler_lidar_sim) {
+        m_doppler_lidar_sim->write(0, t_new[0], nstep,
+                                   vars_new[0][Vars::cons],
+                                   vars_new[0][Vars::xvel],
+                                   vars_new[0][Vars::yvel],
+                                   vars_new[0][Vars::zvel],
+                                   vars_new[0][Vars::cons],
+                                   geom[0],
+                                   dl_mpdata.get());
+    }
+    if (m_mwr_sim) {
+        m_mwr_sim->write(0, t_new[0], nstep,
+                         vars_new[0][Vars::cons],
+                         base_state[0],
+                         vars_new[0][Vars::cons],
+                         geom[0]);
+    }
+
     // Moving terrain
     if ( solverChoice.terrain_type == TerrainType::MovingFittedMesh )
     {
@@ -1967,6 +2109,35 @@ ERF::InitData_post ()
             Abort("Need to specify plane_sampling_interval or plane_sampling_per");
         }
         plane_sampler = std::make_unique<PlaneSampler>();
+    }
+
+    // Create instrument simulator objects if enabled
+    {
+        amrex::ParmParse pp_ceil("erf.ceilometer");
+        bool do_ceil = false;
+        pp_ceil.query("do_sim", do_ceil);
+        if (do_ceil) {
+            m_ceilometer_sim = std::make_unique<CeilometerSimulator>();
+            m_ceilometer_sim->init(geom[0]);
+        }
+    }
+    {
+        amrex::ParmParse pp_dl("erf.doppler_lidar");
+        bool do_dl = false;
+        pp_dl.query("do_sim", do_dl);
+        if (do_dl) {
+            m_doppler_lidar_sim = std::make_unique<DopplerLidarSimulator>();
+            m_doppler_lidar_sim->init(geom[0]);
+        }
+    }
+    {
+        amrex::ParmParse pp_mwr("erf.mwr");
+        bool do_mwr = false;
+        pp_mwr.query("do_sim", do_mwr);
+        if (do_mwr) {
+            m_mwr_sim = std::make_unique<MWRSimulator>();
+            m_mwr_sim->init(geom[0]);
+        }
     }
 
     if ( solverChoice.terrain_type == TerrainType::EB ||
