@@ -222,6 +222,8 @@ ERF::ERF_shared ()
             // pass radiation datalog frequency to model - RRTMGP needs to know when to save data for profiles
             rad[lev]->setDataLogFrequency(rad_datalog_int);
 #endif
+        } else if (solverChoice.rad_type == RadiationType::SimpleLW) {
+            rad[lev] = std::make_unique<SimpleLW>(lev, solverChoice);
         } else if (solverChoice.rad_type != RadiationType::None) {
             Abort("Don't know this radiation model!");
         }

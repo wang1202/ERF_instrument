@@ -411,6 +411,7 @@ function(build_erf_lib erf_lib_name)
        ${SRC_DIR}/TimeIntegration/ERF_AdvanceMicrophysics.cpp
        ${SRC_DIR}/TimeIntegration/ERF_AdvanceLSM.cpp
        ${SRC_DIR}/TimeIntegration/ERF_AdvanceRadiation.cpp
+       ${SRC_DIR}/PhysicsInterfaces/Radiation/ERF_SimpleLW.cpp
        ${SRC_DIR}/TimeIntegration/ERF_MakeFastCoeffs.cpp
        ${SRC_DIR}/TimeIntegration/ERF_MakeTauTerms.cpp
        ${SRC_DIR}/TimeIntegration/ERF_SlowRhsPre.cpp

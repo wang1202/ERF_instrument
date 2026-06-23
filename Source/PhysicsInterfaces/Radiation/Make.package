@@ -1,5 +1,7 @@
 CEXE_headers += ERF_RadiationInterface.H
 CEXE_headers += ERF_RadiationModels.H
+CEXE_headers += ERF_SimpleLW.H
+CEXE_sources += ERF_SimpleLW.cpp
 
 ifeq ($(USE_RRTMGP), TRUE)
     CEXE_headers += ERF_RRTMGP_Interface.H
