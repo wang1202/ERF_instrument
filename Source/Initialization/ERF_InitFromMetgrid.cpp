@@ -256,7 +256,7 @@ ERF::init_from_metgrid (int lev)
                 Print() << "start_bdy_time is " << std::setprecision(timeprecision) << start_bdy_time
                         << " from metgrid file but note that time variable in simulation is elapsed time" << std::endl;
                 t_new[lev] = zero;
-                t_old[lev] = -Real(1.e200);
+                t_old[lev] = -bogus_large_value;
             } else {
                 // Verify that files in nc_init_file[lev] are ordered from earliest to latest.
                 AMREX_ALWAYS_ASSERT(NC_epochTime[itime] > NC_epochTime[itime-1]);
@@ -1203,7 +1203,6 @@ init_base_state_from_metgrid (const bool use_moisture,
         const Real T00       = Real(290.0);
         const Real TLP       = Real(50.0);
         const Real TISO      = Real(200.0);
-        const Real TLP_STRAT = Real(-11.0);
 
         const Array4<Real>& r_hse_arr  = r_hse_fab.array();
         const Array4<Real>& p_hse_arr  = p_hse_fab.array();
