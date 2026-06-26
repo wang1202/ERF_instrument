@@ -257,6 +257,9 @@ public:
     // Called after every level 0 timestep
     void post_timestep (int nstep, double time, amrex::Real dt_lev);
 
+    // Do whatever writing needs to be done at intermediate times
+    void WriteAtIntermediateTime(int nstep, double time);
+
     // Do whatever writing needs to be done after time-stepping is complete
     void WriteAtFinalTime();
 
@@ -1165,7 +1168,8 @@ private:
                                                     "vorticity_x","vorticity_y","vorticity_z",
                                                     "helicity", "local_helicity",
                                                     "magvel", "divU",
-                                                    "pres_hse", "dens_hse", "theta_hse", "pressure", "pert_pres", "pert_dens",
+                                                    "pres_hse", "dens_hse", "theta_hse", "qv_hse",
+                                                    "pressure", "pert_pres", "pert_dens",
                                                     "buoyancy", "eq_pot_temp", "VPD",
 #ifdef ERF_USE_WINDFARM
                                                     "num_turb", "SMark0", "SMark1",
