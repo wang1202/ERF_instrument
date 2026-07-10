@@ -554,16 +554,16 @@ ERF::post_timestep (int nstep, double time, double dt_lev0)
         if (ceil_write) {
             amrex::Vector<int> ilocs, jlocs;
             for (int s = 0; s < m_ceilometer_sim->NSites(); ++s) {
-                ilocs.push_back(m_ceilometer_sim->ILoc(s));
-                jlocs.push_back(m_ceilometer_sim->JLoc(s));
+                ilocs.push_back(m_ceilometer_sim->ILoc(s, t_new[0], geom[0]));
+                jlocs.push_back(m_ceilometer_sim->JLoc(s, t_new[0], geom[0]));
             }
             ceil_mpdata = fill_sdm(ilocs, jlocs);
         }
         if (dl_write) {
             amrex::Vector<int> ilocs, jlocs;
             for (int s = 0; s < m_doppler_lidar_sim->NSites(); ++s) {
-                ilocs.push_back(m_doppler_lidar_sim->ILoc(s));
-                jlocs.push_back(m_doppler_lidar_sim->JLoc(s));
+                ilocs.push_back(m_doppler_lidar_sim->ILoc(s, t_new[0], geom[0]));
+                jlocs.push_back(m_doppler_lidar_sim->JLoc(s, t_new[0], geom[0]));
             }
             dl_mpdata = fill_sdm(ilocs, jlocs);
         }

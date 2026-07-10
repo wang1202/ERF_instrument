@@ -207,20 +207,28 @@ Radiation::set_grids (int& level,
     if (m_update_rad) {
         // Call to Init() has set the dimensions: ncol & nlay
 
-        // Allocate the buffer arrays
-        alloc_buffers();
+        // Allocate the buffer arrays once per grid layout and reuse them across
+        // radiation calls to avoid repeated GPU heap churn.
+        if (!m_buffers_allocated) {
+            alloc_buffers();
+            m_buffers_allocated = true;
+        }
 
         // Fill the KOKKOS Views from AMReX MFs
         mf_to_kokkos_buffers(lmask, t_surf, lsm_input_ptrs);
 
-        // Initialize datalog MF on first step
-        if (m_first_step) {
-            m_first_step = false;
-            if (datalog_int > 0) {
+        // Keep the datalog MultiFab aligned with the active grid layout.
+        // Regridding can change the BoxArray/DistributionMap after step 0.
+        if (datalog_int > 0) {
+            if (m_first_step ||
+                datalog_mf.boxArray() != cons_in->boxArray() ||
+                datalog_mf.DistributionMap() != cons_in->DistributionMap()) {
                 datalog_mf.define(cons_in->boxArray(), cons_in->DistributionMap(), 25, 0);
                 datalog_mf.setVal(0.0);
             }
         }
+
+        m_first_step = false;
     }
 }
 
@@ -1101,56 +1109,6 @@ Radiation::run_impl ()
        eccf = fixed_total_solar_irradiance/Real(1360.9);
     }
 
-    // Precompute volume mixing ratio (VMR) for all gases
-    //
-    // H2O is obtained from qv.
-    // O3 may be a constant or a 1D vector
-    // All other comps are set to constants for now
-    Vector<real2d_k> vmr_full_vec(m_ngas);
-    for (int igas(0); igas < m_ngas; ++igas) {
-        auto name = m_gas_names[igas];
-        vmr_full_vec[igas] = real2d_k("vmr_full_" + name, ncol, nlay);
-        auto tmp2d = vmr_full_vec[igas];
-        auto gas_mol_weight = m_mol_weight_gas[igas];
-        if (name == "H2O") {
-            auto qv_lay_d = qv_lay;
-            Kokkos::parallel_for(Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0, 0}, {ncol, nlay}),
-                                 KOKKOS_LAMBDA (int icol, int ilay)
-            {
-                tmp2d(icol,ilay) = qv_lay_d(icol,ilay) * mwdair/gas_mol_weight;
-            });
-        } else if (name == "CO2") {
-            Kokkos::deep_copy(tmp2d, m_co2vmr);
-        } else if (name == "O3")  {
-            if (m_o3_size==1) {
-                Kokkos::deep_copy(tmp2d, m_o3vmr[0] );
-            } else {
-                auto o3_lay_d = o3_lay;
-                Kokkos::parallel_for(Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0, 0}, {ncol, nlay}),
-                                     KOKKOS_LAMBDA (int icol, int ilay)
-                {
-                    tmp2d(icol,ilay) = o3_lay_d(ilay);
-                });
-            }
-        } else if (name == "N2O") {
-            Kokkos::deep_copy(tmp2d, m_n2ovmr);
-        } else if (name == "CO")  {
-            Kokkos::deep_copy(tmp2d, m_covmr );
-        } else if (name == "CH4") {
-            Kokkos::deep_copy(tmp2d, m_ch4vmr);
-        } else if (name == "O2") {
-            Kokkos::deep_copy(tmp2d, m_o2vmr );
-        } else if (name == "N2") {
-            Kokkos::deep_copy(tmp2d, m_n2vmr );
-        } else {
-            Abort("Radiation: Unknown gas component.");
-        }
-
-        // Populate GasConcs object
-        m_gas_concs.set_vmr(name, tmp2d);
-        Kokkos::fence();
-    }
-
     // Populate mu0 1D array
     // This must be done on HOST and copied to device.
     auto h_mu0 = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), mu0);
@@ -1230,6 +1188,7 @@ Radiation::run_impl ()
         real2d_k cldfrac_tot_c  (cldfrac_tot.data()   + col_s*stride2_nlay, ncol_c, nlay);
         real2d_k sw_heating_c   (sw_heating.data()    + col_s*stride2_nlay, ncol_c, nlay);
         real2d_k lw_heating_c   (lw_heating.data()    + col_s*stride2_nlay, ncol_c, nlay);
+        real2d_k qv_lay_c       (qv_lay.data()        + col_s*stride2_nlay, ncol_c, nlay);
 
         // --- Chunk subviews: 2D (ncol, nlay+1) ---
         real2d_k p_lev_c                   (p_lev.data()                 + col_s*stride2_nlayp1, ncol_c, nlay+1);
@@ -1303,18 +1262,49 @@ Radiation::run_impl ()
         real3d_k lw_bnd_flux_up_c (lw_bnd_flux_up.data() , ncol_c, nlay+1, m_nlwbands);
         real3d_k lw_bnd_flux_dn_c (lw_bnd_flux_dn.data() , ncol_c, nlay+1, m_nlwbands);
 
-        // --- Create chunk gas concentrations by subsetting from pre-fetched VMR ---
+        // --- Create chunk gas concentrations directly, avoiding a full-domain VMR staging copy ---
         gas_concs_t gas_concs_c;
         gas_concs_c.init(gas_names_offset, ncol_c, nlay);
         for (int igas = 0; igas < m_ngas; ++igas) {
-            real2d_k vmr_c("vmr_c", ncol_c, nlay);
-            auto vmr_full = vmr_full_vec[igas];
-            auto cs = col_s;
-            Kokkos::parallel_for(Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0, 0}, {ncol_c, nlay}),
-                                 KOKKOS_LAMBDA (int i, int j) {
-                vmr_c(i, j) = vmr_full(cs + i, j);
-            });
-            gas_concs_c.set_vmr(m_gas_names[igas], vmr_c);
+            auto name = m_gas_names[igas];
+            auto gas_mol_weight = m_mol_weight_gas[igas];
+            real2d_k vmr_c("vmr_c_" + name, ncol_c, nlay);
+
+            if (name == "H2O") {
+                auto qv_lay_d = qv_lay_c;
+                Kokkos::parallel_for(Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0, 0}, {ncol_c, nlay}),
+                                     KOKKOS_LAMBDA (int icol, int ilay)
+                {
+                    vmr_c(icol,ilay) = qv_lay_d(icol,ilay) * mwdair/gas_mol_weight;
+                });
+            } else if (name == "CO2") {
+                Kokkos::deep_copy(vmr_c, m_co2vmr);
+            } else if (name == "O3")  {
+                if (m_o3_size == 1) {
+                    Kokkos::deep_copy(vmr_c, m_o3vmr[0]);
+                } else {
+                    auto o3_lay_d = o3_lay;
+                    Kokkos::parallel_for(Kokkos::MDRangePolicy<Kokkos::Rank<2>>({0, 0}, {ncol_c, nlay}),
+                                         KOKKOS_LAMBDA (int icol, int ilay)
+                    {
+                        vmr_c(icol,ilay) = o3_lay_d(ilay);
+                    });
+                }
+            } else if (name == "N2O") {
+                Kokkos::deep_copy(vmr_c, m_n2ovmr);
+            } else if (name == "CO")  {
+                Kokkos::deep_copy(vmr_c, m_covmr);
+            } else if (name == "CH4") {
+                Kokkos::deep_copy(vmr_c, m_ch4vmr);
+            } else if (name == "O2") {
+                Kokkos::deep_copy(vmr_c, m_o2vmr);
+            } else if (name == "N2") {
+                Kokkos::deep_copy(vmr_c, m_n2vmr);
+            } else {
+                Abort("Radiation: Unknown gas component.");
+            }
+
+            gas_concs_c.set_vmr(name, vmr_c);
         }
 
         // Expand surface albedos along nswbands for this chunk
@@ -1358,8 +1348,14 @@ Radiation::run_impl ()
                                                  sfc_flux_dir_vis_c, sfc_flux_dir_nir_c,
                                                  sfc_flux_dif_vis_c, sfc_flux_dif_nir_c);
 
+        // Chunk-local Views must stay alive until all queued kernels using them complete.
+        Kokkos::fence();
         gas_concs_c.reset();
     } // end column chunk loop
+
+    // Ensure all radiation kernels using run-local temporary Views have completed
+    // before those temporaries are destroyed on return from this routine.
+    Kokkos::fence();
 }
 
 
@@ -1383,6 +1379,7 @@ Radiation::finalize_impl (Vector<MultiFab*>& lsm_output_ptrs)
         populateDatalogMF();
     }
 
-    // Deallocate the buffer arrays
-    dealloc_buffers();
+    // Synchronize before returning to the caller so all writes into the
+    // persistent radiation buffers are complete.
+    Kokkos::fence();
 }

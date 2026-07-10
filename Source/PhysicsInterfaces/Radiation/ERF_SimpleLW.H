@@ -57,8 +57,8 @@ public:
     void
     Run (int& level,
          int& step,
-         amrex::Real& time,
-         const amrex::Real& dt,
+         double& time,
+         const double& dt,
          const amrex::BoxArray& ba,
          amrex::Geometry& geom,
          amrex::MultiFab* cons_in,
@@ -70,7 +70,8 @@ public:
          amrex::MultiFab* rad_fluxes,
          amrex::MultiFab* z_phys,
          amrex::MultiFab* lat,
-         amrex::MultiFab* lon) override;
+         amrex::MultiFab* lon,
+         const bool updated_lsm) override;
 
     void
     WriteDataLog (const amrex::Real& time) override

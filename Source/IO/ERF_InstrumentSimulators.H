@@ -21,6 +21,10 @@
  *   erf.ceilometer.r_eff_default      = 1.0e-5    # m; liquid droplet effective radius fallback
  *   erf.ceilometer.r_eff_ice_default  = 3.0e-5    # m; ice crystal effective radius fallback
  *   erf.ceilometer.beta_thresh        = 3.0e-4    # m-1 sr-1; cloud base detection threshold
+ *   erf.ceilometer.move_start_time    = 60. 120.  # optional moving-column intervals [s]
+ *   erf.ceilometer.move_stop_time     = 120. 240.
+ *   erf.ceilometer.move_speed_x       = -10. 0.   # optional physical speeds [m s-1]
+ *   erf.ceilometer.move_speed_y       = 0. -5.
  *
  *   # ---- Doppler Lidar (Halo StreamLine XR+, 1550 nm) ----
  *   erf.doppler_lidar.do_sim              = true
@@ -41,6 +45,10 @@
  *   erf.doppler_lidar.beam_radius         = 0.0225  # omega [m] 1/e^2 beam radius at aperture
  *   erf.doppler_lidar.bandwidth           = 50.0e6  # Bw  [Hz]  receiver noise bandwidth
  *   erf.doppler_lidar.focus_range         = 1.0e9   # R   [m]   radius of curvature (1e9=collimated)
+ *   erf.doppler_lidar.move_start_time     = 60. 120. # optional moving-column intervals [s]
+ *   erf.doppler_lidar.move_stop_time      = 120. 240.
+ *   erf.doppler_lidar.move_speed_x        = -10. 0.  # optional physical speeds [m s-1]
+ *   erf.doppler_lidar.move_speed_y        = 0. -5.
  *
  *   # ---- MWR (Radiometrics MP-3000A, K+V band, 35 channels) ----
  *   erf.mwr.do_sim             = true
@@ -49,6 +57,10 @@
  *   erf.mwr.output_interval    = 10
  *   erf.mwr.output_file        = mwr_
  *   erf.mwr.do_brightness_temp = false   # true = also write simulated TB (35 channels)
+ *   erf.mwr.move_start_time    = 60. 120. # optional moving-column intervals [s]
+ *   erf.mwr.move_stop_time     = 120. 240.
+ *   erf.mwr.move_speed_x       = -10. 0.  # optional physical speeds [m s-1]
+ *   erf.mwr.move_speed_y       = 0. -5.
  *
  * See Docs/instrument_simulators/instrument_simulator_design.pdf for full physics derivation.
  */
@@ -57,6 +69,7 @@
 #include <iomanip>
 #include <string>
 #include <cmath>
+#include <algorithm>
 
 #include <AMReX_ParmParse.H>
 #include <AMReX_MultiFab.H>
@@ -75,6 +88,91 @@ namespace {
 // ============================================================
 
 namespace InstrumentSimUtil {
+
+struct SiteLocation {
+    int i;
+    int j;
+    amrex::Real x;
+    amrex::Real y;
+};
+
+struct MoveSchedule {
+    amrex::Vector<amrex::Real> start_time;
+    amrex::Vector<amrex::Real> stop_time;
+    amrex::Vector<amrex::Real> speed_x;
+    amrex::Vector<amrex::Real> speed_y;
+
+    void init (amrex::ParmParse& pp, const std::string& prefix)
+    {
+        int ns = pp.queryarr("move_start_time", start_time);
+        int ne = pp.queryarr("move_stop_time",  stop_time);
+        int nx = pp.queryarr("move_speed_x",    speed_x);
+        int ny = pp.queryarr("move_speed_y",    speed_y);
+
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+            ns == ne, (prefix + ": move_start_time and move_stop_time must have the same number of entries").c_str());
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+            nx == ny, (prefix + ": move_speed_x and move_speed_y must have the same number of entries").c_str());
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+            ns == nx, (prefix + ": move times and move speeds must have the same number of entries").c_str());
+
+        for (int n = 0; n < ns; ++n) {
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                stop_time[n] > start_time[n],
+                (prefix + ": move_stop_time must be greater than move_start_time").c_str());
+            if (n > 0) {
+                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    start_time[n] >= stop_time[n-1],
+                    (prefix + ": move intervals must not overlap").c_str());
+            }
+        }
+    }
+
+    amrex::Real offset_x (amrex::Real time) const
+    {
+        amrex::Real offset = 0.0;
+        for (int n = 0; n < static_cast<int>(start_time.size()); ++n) {
+            if (time > start_time[n]) {
+                offset += speed_x[n] * (std::min(time, stop_time[n]) - start_time[n]);
+            }
+        }
+        return offset;
+    }
+
+    amrex::Real offset_y (amrex::Real time) const
+    {
+        amrex::Real offset = 0.0;
+        for (int n = 0; n < static_cast<int>(start_time.size()); ++n) {
+            if (time > start_time[n]) {
+                offset += speed_y[n] * (std::min(time, stop_time[n]) - start_time[n]);
+            }
+        }
+        return offset;
+    }
+
+    bool moving () const { return !start_time.empty(); }
+};
+
+inline SiteLocation
+site_location_at_time (int i0, int j0, amrex::Real time,
+                       const amrex::Geometry& geom,
+                       const MoveSchedule& move)
+{
+    const amrex::Real dx = geom.CellSize(0);
+    const amrex::Real dy = geom.CellSize(1);
+    const amrex::Real x = geom.ProbLo(0) + (static_cast<amrex::Real>(i0) + 0.5) * dx
+                         + move.offset_x(time);
+    const amrex::Real y = geom.ProbLo(1) + (static_cast<amrex::Real>(j0) + 0.5) * dy
+                         + move.offset_y(time);
+
+    const amrex::Box& dom = geom.Domain();
+    int i = static_cast<int>(std::floor((x - geom.ProbLo(0)) / dx));
+    int j = static_cast<int>(std::floor((y - geom.ProbLo(1)) / dy));
+    i = std::max(dom.smallEnd(0), std::min(i, dom.bigEnd(0)));
+    j = std::max(dom.smallEnd(1), std::min(j, dom.bigEnd(1)));
+
+    return {i, j, x, y};
+}
 
 /** Extract a full z-column at (iloc, jloc) from a cell-centered MultiFab.
  *  Returns a host vector of size nz (= domain khi - klo + 1).
@@ -274,6 +372,7 @@ struct CeilometerSimulator
         pp.query("r_eff_default",       m_r_eff_default);
         pp.query("r_eff_ice_default",   m_r_eff_ice_default);
         pp.query("beta_thresh",         m_beta_thresh);
+        m_move.init(pp, "erf.ceilometer");
 
         // open one file per site
         m_streams.resize(m_nsites);
@@ -287,12 +386,17 @@ struct CeilometerSimulator
                 // write header
                 *m_streams[s]
                     << "# ERF Ceilometer Simulator (Vaisala CL-31, 905 nm)\n"
-                    << "# i_loc=" << m_iloc[s] << "  j_loc=" << m_jloc[s] << "\n"
+                    << "# initial_i_loc=" << m_iloc[s] << "  initial_j_loc=" << m_jloc[s] << "\n"
+                    << "# move_enabled=" << (m_move.moving() ? "true" : "false") << "\n"
                     << "# backscatter_model=" << m_backscatter_model << "\n"
                     << "# Col 1: time [s]\n"
-                    << "# Col 2: height [m]\n"
-                    << "# Col 3: att_backscatter [m-1 sr-1]\n"
-                    << "# Col 4: cloud_base_height [m]  (-9999 = no cloud)\n";
+                    << "# Col 2: x [m]\n"
+                    << "# Col 3: y [m]\n"
+                    << "# Col 4: i_loc\n"
+                    << "# Col 5: j_loc\n"
+                    << "# Col 6: height [m]\n"
+                    << "# Col 7: att_backscatter [m-1 sr-1]\n"
+                    << "# Col 8: cloud_base_height [m]  (-9999 = no cloud)\n";
                 m_streams[s]->flush();
             }
         }
@@ -302,6 +406,14 @@ struct CeilometerSimulator
     int NSites() const { return m_nsites; }
     int ILoc(int s) const { return m_iloc[s]; }
     int JLoc(int s) const { return m_jloc[s]; }
+    int ILoc(int s, amrex::Real t, const amrex::Geometry& geom) const
+    {
+        return InstrumentSimUtil::site_location_at_time(m_iloc[s], m_jloc[s], t, geom, m_move).i;
+    }
+    int JLoc(int s, amrex::Real t, const amrex::Geometry& geom) const
+    {
+        return InstrumentSimUtil::site_location_at_time(m_iloc[s], m_jloc[s], t, geom, m_move).j;
+    }
     bool is_write_step(int istep) const { return (istep % m_output_interval) == 0; }
 
     /** Write ceilometer data for current timestep.
@@ -322,8 +434,9 @@ struct CeilometerSimulator
         amrex::Real zlo = geom.ProbLo(2) + 0.5 * dz;
 
         for (int s = 0; s < m_nsites; ++s) {
-            int iloc = m_iloc[s];
-            int jloc = m_jloc[s];
+            auto loc = InstrumentSimUtil::site_location_at_time(m_iloc[s], m_jloc[s], t, geom, m_move);
+            int iloc = loc.i;
+            int jloc = loc.j;
 
             // Extract rho [kg/m3] and rho*qc [kg/m3]
             auto rho_col = InstrumentSimUtil::extract_column(
@@ -394,6 +507,10 @@ struct CeilometerSimulator
                 amrex::Real z_k = zlo + k * dz;
                 out << std::scientific << std::setprecision(6)
                     << std::setw(14) << t
+                    << std::setw(14) << loc.x
+                    << std::setw(14) << loc.y
+                    << std::setw(8)  << iloc
+                    << std::setw(8)  << jloc
                     << std::setw(14) << z_k
                     << std::setw(14) << beta_att[k]
                     << std::setw(14) << z_cb
@@ -412,6 +529,7 @@ private:
     amrex::Real           m_r_eff_default{1.0e-5};     // m (liquid)
     amrex::Real           m_r_eff_ice_default{3.0e-5}; // m (ice)
     amrex::Real           m_beta_thresh{3.0e-4};       // m-1 sr-1
+    InstrumentSimUtil::MoveSchedule m_move;
 
     // Lidar ratios at 905 nm
     static constexpr amrex::Real m_S_lidar_liq_905{18.8}; // sr
@@ -432,6 +550,14 @@ struct DopplerLidarSimulator
     int NSites() const { return m_nsites; }
     int ILoc(int s) const { return m_iloc[s]; }
     int JLoc(int s) const { return m_jloc[s]; }
+    int ILoc(int s, amrex::Real t, const amrex::Geometry& geom) const
+    {
+        return InstrumentSimUtil::site_location_at_time(m_iloc[s], m_jloc[s], t, geom, m_move).i;
+    }
+    int JLoc(int s, amrex::Real t, const amrex::Geometry& geom) const
+    {
+        return InstrumentSimUtil::site_location_at_time(m_iloc[s], m_jloc[s], t, geom, m_move).j;
+    }
     bool is_write_step(int istep) const { return (istep % m_output_interval) == 0; }
 
     void init (const amrex::Geometry& geom)
@@ -461,6 +587,7 @@ struct DopplerLidarSimulator
         pp.query("vad_elevation_angle",  m_vad_elevation_angle);
         pp.query("do_backscatter",       m_do_backscatter);
         pp.query("r_eff_default",        m_r_eff_default);
+        m_move.init(pp, "erf.doppler_lidar");
 
         // CNR model: "normalized" (SNR = beta_att/r^2, default) or
         //            "physical"   (CNR = F(r)*beta_att, Targ et al. 1991)
@@ -487,37 +614,52 @@ struct DopplerLidarSimulator
                     m_stare_streams.push_back(open_stream(
                         m_output_prefix + tag + "_stare.txt",
                         "# ERF Doppler Lidar Simulator (Halo XR+, 1550 nm) -- vertical stare\n"
-                        "# i_loc=" + std::to_string(m_iloc[s]) +
-                        "  j_loc=" + std::to_string(m_jloc[s]) + "\n"
+                        "# initial_i_loc=" + std::to_string(m_iloc[s]) +
+                        "  initial_j_loc=" + std::to_string(m_jloc[s]) + "\n"
+                        "# move_enabled=" + std::string(m_move.moving() ? "true" : "false") + "\n"
                         + cnr_hdr +
                         "# Col 1: time [s]\n"
-                        "# Col 2: height [m]\n"
-                        "# Col 3: w [m s-1]\n"
-                        "# Col 4: CNR [-]\n"));
+                        "# Col 2: x [m]\n"
+                        "# Col 3: y [m]\n"
+                        "# Col 4: i_loc\n"
+                        "# Col 5: j_loc\n"
+                        "# Col 6: height [m]\n"
+                        "# Col 7: w [m s-1]\n"
+                        "# Col 8: CNR [-]\n"));
                 }
                 if (m_do_vad) {
                     m_vad_streams.push_back(open_stream(
                         m_output_prefix + tag + "_vad.txt",
                         "# ERF Doppler Lidar Simulator -- VAD mode (elev="
                         + std::to_string(m_vad_elevation_angle) + " deg, 36 azimuths)\n"
-                        "# i_loc=" + std::to_string(m_iloc[s]) +
-                        "  j_loc=" + std::to_string(m_jloc[s]) + "\n"
+                        "# initial_i_loc=" + std::to_string(m_iloc[s]) +
+                        "  initial_j_loc=" + std::to_string(m_jloc[s]) + "\n"
+                        "# move_enabled=" + std::string(m_move.moving() ? "true" : "false") + "\n"
                         "# Col 1: time [s]\n"
-                        "# Col 2: height [m]\n"
-                        "# Col 3: u [m s-1]\n"
-                        "# Col 4: v [m s-1]\n"
-                        "# Col 5: wind_speed [m s-1]\n"
-                        "# Col 6: wind_dir [deg, met convention]\n"));
+                        "# Col 2: x [m]\n"
+                        "# Col 3: y [m]\n"
+                        "# Col 4: i_loc\n"
+                        "# Col 5: j_loc\n"
+                        "# Col 6: height [m]\n"
+                        "# Col 7: u [m s-1]\n"
+                        "# Col 8: v [m s-1]\n"
+                        "# Col 9: wind_speed [m s-1]\n"
+                        "# Col 10: wind_dir [deg, met convention]\n"));
                 }
                 if (m_do_backscatter) {
                     m_beta_streams.push_back(open_stream(
                         m_output_prefix + tag + "_beta.txt",
                         "# ERF Doppler Lidar Simulator -- att. backscatter (1550 nm)\n"
-                        "# i_loc=" + std::to_string(m_iloc[s]) +
-                        "  j_loc=" + std::to_string(m_jloc[s]) + "\n"
+                        "# initial_i_loc=" + std::to_string(m_iloc[s]) +
+                        "  initial_j_loc=" + std::to_string(m_jloc[s]) + "\n"
+                        "# move_enabled=" + std::string(m_move.moving() ? "true" : "false") + "\n"
                         "# Col 1: time [s]\n"
-                        "# Col 2: height [m]\n"
-                        "# Col 3: beta_att [m-1 sr-1]\n"));
+                        "# Col 2: x [m]\n"
+                        "# Col 3: y [m]\n"
+                        "# Col 4: i_loc\n"
+                        "# Col 5: j_loc\n"
+                        "# Col 6: height [m]\n"
+                        "# Col 7: beta_att [m-1 sr-1]\n"));
                 }
             }
         }
@@ -545,8 +687,9 @@ struct DopplerLidarSimulator
 
         int stare_idx = 0, vad_idx = 0, beta_idx = 0;
         for (int s = 0; s < m_nsites; ++s) {
-            int iloc = m_iloc[s];
-            int jloc = m_jloc[s];
+            auto loc = InstrumentSimUtil::site_location_at_time(m_iloc[s], m_jloc[s], t, geom, m_move);
+            int iloc = loc.i;
+            int jloc = loc.j;
 
             // Extract columns (always on all ranks)
             amrex::Vector<amrex::Real> u_col, v_col, w_col;
@@ -631,6 +774,10 @@ struct DopplerLidarSimulator
                     }
                     out << std::scientific << std::setprecision(6)
                         << std::setw(14) << t
+                        << std::setw(14) << loc.x
+                        << std::setw(14) << loc.y
+                        << std::setw(8)  << iloc
+                        << std::setw(8)  << jloc
                         << std::setw(14) << z_k
                         << std::setw(14) << w_col[k]
                         << std::setw(14) << cnr
@@ -681,6 +828,10 @@ struct DopplerLidarSimulator
 
                     out << std::scientific << std::setprecision(6)
                         << std::setw(14) << t
+                        << std::setw(14) << loc.x
+                        << std::setw(14) << loc.y
+                        << std::setw(8)  << iloc
+                        << std::setw(8)  << jloc
                         << std::setw(14) << z_k
                         << std::setw(14) << u_ret
                         << std::setw(14) << v_ret
@@ -699,6 +850,10 @@ struct DopplerLidarSimulator
                     amrex::Real z_k = zlo + k * dz;
                     out << std::scientific << std::setprecision(6)
                         << std::setw(14) << t
+                        << std::setw(14) << loc.x
+                        << std::setw(14) << loc.y
+                        << std::setw(8)  << iloc
+                        << std::setw(8)  << jloc
                         << std::setw(14) << z_k
                         << std::setw(14) << beta_att[k]
                         << "\n";
@@ -720,6 +875,7 @@ private:
     bool                  m_do_backscatter{false};
     amrex::Real           m_vad_elevation_angle{75.0}; // degrees
     amrex::Real           m_r_eff_default{1.0e-5};     // m
+    InstrumentSimUtil::MoveSchedule m_move;
 
     // CNR model selection and instrument parameters (Targ et al. 1991)
     std::string           m_cnr_model{"normalized"};   // "normalized" or "physical"
@@ -847,6 +1003,7 @@ struct MWRSimulator
         pp.query("output_interval",    m_output_interval);
         pp.query("output_file",         m_output_prefix);
         pp.query("do_brightness_temp",  m_do_tb);
+        m_move.init(pp, "erf.mwr");
 
         // MP-3000A channel frequencies (35 channels)
         m_freqs = {
@@ -866,32 +1023,47 @@ struct MWRSimulator
                 m_prof_streams.push_back(open_stream(
                     m_output_prefix + tag + "_profiles.txt",
                     "# ERF MWR Simulator (Radiometrics MP-3000A)\n"
-                    "# i_loc=" + std::to_string(m_iloc[s]) +
-                    "  j_loc=" + std::to_string(m_jloc[s]) + "\n"
+                    "# initial_i_loc=" + std::to_string(m_iloc[s]) +
+                    "  initial_j_loc=" + std::to_string(m_jloc[s]) + "\n"
+                    "# move_enabled=" + std::string(m_move.moving() ? "true" : "false") + "\n"
                     "# Col 1: time [s]\n"
-                    "# Col 2: height [m]\n"
-                    "# Col 3: T [K]\n"
-                    "# Col 4: qv [g kg-1]\n"
-                    "# Col 5: qc [g kg-1]\n"));
+                    "# Col 2: x [m]\n"
+                    "# Col 3: y [m]\n"
+                    "# Col 4: i_loc\n"
+                    "# Col 5: j_loc\n"
+                    "# Col 6: height [m]\n"
+                    "# Col 7: T [K]\n"
+                    "# Col 8: qv [g kg-1]\n"
+                    "# Col 9: qc [g kg-1]\n"));
 
                 m_col_streams.push_back(open_stream(
                     m_output_prefix + tag + "_column.txt",
                     "# ERF MWR Simulator -- column integrals\n"
-                    "# i_loc=" + std::to_string(m_iloc[s]) +
-                    "  j_loc=" + std::to_string(m_jloc[s]) + "\n"
+                    "# initial_i_loc=" + std::to_string(m_iloc[s]) +
+                    "  initial_j_loc=" + std::to_string(m_jloc[s]) + "\n"
+                    "# move_enabled=" + std::string(m_move.moving() ? "true" : "false") + "\n"
                     "# Col 1: time [s]\n"
-                    "# Col 2: LWP [g m-2]\n"
-                    "# Col 3: PWV [mm]\n"));
+                    "# Col 2: x [m]\n"
+                    "# Col 3: y [m]\n"
+                    "# Col 4: i_loc\n"
+                    "# Col 5: j_loc\n"
+                    "# Col 6: LWP [g m-2]\n"
+                    "# Col 7: PWV [mm]\n"));
 
                 if (m_do_tb) {
                     m_tb_streams.push_back(open_stream(
                         m_output_prefix + tag + "_tb.txt",
                         "# ERF MWR Simulator -- simulated brightness temperatures (35 channels)\n"
-                        "# i_loc=" + std::to_string(m_iloc[s]) +
-                        "  j_loc=" + std::to_string(m_jloc[s]) + "\n"
+                        "# initial_i_loc=" + std::to_string(m_iloc[s]) +
+                        "  initial_j_loc=" + std::to_string(m_jloc[s]) + "\n"
+                        "# move_enabled=" + std::string(m_move.moving() ? "true" : "false") + "\n"
                         "# Col 1: time [s]\n"
-                        "# Col 2: frequency [GHz]\n"
-                        "# Col 3: TB [K]\n"));
+                        "# Col 2: x [m]\n"
+                        "# Col 3: y [m]\n"
+                        "# Col 4: i_loc\n"
+                        "# Col 5: j_loc\n"
+                        "# Col 6: frequency [GHz]\n"
+                        "# Col 7: TB [K]\n"));
                 }
             }
         }
@@ -920,8 +1092,9 @@ struct MWRSimulator
         constexpr amrex::Real rho_w = 1000.0;   // kg m-3
 
         for (int s = 0; s < m_nsites; ++s) {
-            int iloc = m_iloc[s];
-            int jloc = m_jloc[s];
+            auto loc = InstrumentSimUtil::site_location_at_time(m_iloc[s], m_jloc[s], t, geom, m_move);
+            int iloc = loc.i;
+            int jloc = loc.j;
 
             // Extract state columns
             auto rho_col    = InstrumentSimUtil::extract_column(
@@ -974,6 +1147,10 @@ struct MWRSimulator
                     amrex::Real z_k = zlo + k * dz;
                     out << std::scientific << std::setprecision(6)
                         << std::setw(14) << t
+                        << std::setw(14) << loc.x
+                        << std::setw(14) << loc.y
+                        << std::setw(8)  << iloc
+                        << std::setw(8)  << jloc
                         << std::setw(14) << z_k
                         << std::setw(14) << T_col[k]
                         << std::setw(14) << qv_col[k]
@@ -988,6 +1165,10 @@ struct MWRSimulator
                 auto& out = *m_col_streams[s];
                 out << std::scientific << std::setprecision(6)
                     << std::setw(14) << t
+                    << std::setw(14) << loc.x
+                    << std::setw(14) << loc.y
+                    << std::setw(8)  << iloc
+                    << std::setw(8)  << jloc
                     << std::setw(14) << lwp
                     << std::setw(14) << pwv
                     << "\n";
@@ -1010,6 +1191,10 @@ struct MWRSimulator
                         T_col, p_col, rho_kgm3, qv_kgkg, lwc_kgm3, dz, freq);
                     out << std::scientific << std::setprecision(6)
                         << std::setw(14) << t
+                        << std::setw(14) << loc.x
+                        << std::setw(14) << loc.y
+                        << std::setw(8)  << iloc
+                        << std::setw(8)  << jloc
                         << std::setw(14) << freq
                         << std::setw(14) << TB
                         << "\n";
@@ -1025,6 +1210,7 @@ private:
     int                   m_output_interval{10};
     std::string           m_output_prefix{"mwr_"};
     bool                  m_do_tb{false};
+    InstrumentSimUtil::MoveSchedule m_move;
     amrex::Vector<amrex::Real> m_freqs; // GHz
 
     amrex::Vector<std::shared_ptr<std::fstream>> m_prof_streams;

@@ -68,8 +68,8 @@ SimpleLW::Init (const Geometry& geom,
 void
 SimpleLW::Run (int& level,
                int& step,
-               Real& time,
-               const Real& dt,
+               double& time,
+               const double& dt,
                const BoxArray& ba,
                Geometry& geom,
                MultiFab* cons_in,
@@ -81,10 +81,11 @@ SimpleLW::Run (int& level,
                MultiFab* rad_fluxes,
                MultiFab* z_phys,
                MultiFab* lat,
-               MultiFab* lon)
+               MultiFab* lon,
+               const bool updated_lsm)
 {
     amrex::ignore_unused(level, time, dt, ba, lmask, t_surf,
-                         lsm_input_ptrs, lsm_output_ptrs,
+                         lsm_input_ptrs, lsm_output_ptrs, updated_lsm,
                          rad_fluxes, lat, lon);
 
     // Check if we should update radiation this step

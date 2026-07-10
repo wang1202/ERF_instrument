@@ -54,6 +54,10 @@ public:
     // Destructor
     ~Radiation ()
     {
+        if (m_buffers_allocated) {
+            Kokkos::fence();
+            dealloc_buffers();
+        }
         // Release k-distribution data and memory pool
         if (rrtmgp::initialized) {
             rrtmgp::rrtmgp_finalize();
@@ -67,6 +71,15 @@ public:
           const amrex::BoxArray& ba,
           amrex::MultiFab* cons_in) override
     {
+        if (m_buffers_allocated &&
+            (m_ba != ba || m_nlay != geom.Domain().length(2))) {
+            Kokkos::fence();
+            dealloc_buffers();
+            m_buffers_allocated = false;
+            datalog_mf.clear();
+            m_first_step = true;
+        }
+
         // Ensure the boxes span klo -> khi
         int klo = geom.Domain().smallEnd(2);
         int khi = geom.Domain().bigEnd(2);
@@ -89,6 +102,7 @@ public:
         }
 
         m_ncol_chunk = amrex::min(m_ncol, m_ncol_chunk);
+        m_ba = ba;
     };
 
     virtual
@@ -241,6 +255,7 @@ private:
     bool m_rad_write_fluxes = false;
 
     bool m_first_step = true;
+    bool m_buffers_allocated = false;
 
     // Do we have moisture and cold comps?
     bool m_moist = false;

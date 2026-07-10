@@ -411,7 +411,7 @@ namespace MORRInd {
           Real m_cons41;
 
           // Set microphysics control parameters
-          m_inum = 1;           // Use constant droplet number concentration
+          m_inum = 0;           // Use constant droplet number concentration
           m_ndcnst = Real(250.0);     // Droplet number concentration (cm^-3)
           // Mathematical constants
           m_pi = Real(3.1415926535897932384626434);
@@ -1008,6 +1008,9 @@ namespace MORRInd {
                 // CONVERT NDCNST FROM CM-3 TO KG-1
                 // Note: NDCNST constant would need to be defined elsewhere
                 morr_arr(i,j,k,MORRInd::nc3d) = m_ndcnst * Real(1.0e6) / morr_arr(i,j,k,MORRInd::rho); // Set cloud droplet number concentration
+              } else if (morr_arr(i,j,k,MORRInd::qc3d) >= m_qsmall && morr_arr(i,j,k,MORRInd::nc3d) <= Real(0)) {
+                // Prognostic Nc: seed from aerosol concentration when cloud forms but nc3d was zeroed
+                morr_arr(i,j,k,MORRInd::nc3d) = (m_nanew1 + m_nanew2) / morr_arr(i,j,k,MORRInd::rho);
               }
 
               // GET SIZE DISTRIBUTION PARAMETERS
@@ -1497,6 +1500,9 @@ namespace MORRInd {
                 // CONVERT NDCNST FROM CM-3 TO KG-1
                 // Note: NDCNST constant would need to be defined elsewhere
                 morr_arr(i,j,k,MORRInd::nc3d) = m_ndcnst * Real(1.0e6) / morr_arr(i,j,k,MORRInd::rho); // Set cloud droplet number concentration
+              } else if (morr_arr(i,j,k,MORRInd::qc3d) >= m_qsmall && morr_arr(i,j,k,MORRInd::nc3d) <= Real(0)) {
+                // Prognostic Nc: seed from aerosol concentration when cloud forms but nc3d was zeroed
+                morr_arr(i,j,k,MORRInd::nc3d) = (m_nanew1 + m_nanew2) / morr_arr(i,j,k,MORRInd::rho);
               }
 
               morr_arr(i,j,k,MORRInd::ni3d) = amrex::max(Real(0),morr_arr(i,j,k,MORRInd::ni3d));

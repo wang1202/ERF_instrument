@@ -242,4 +242,3 @@ void ERFPC::ConvertZToZeta (const Vector<std::unique_ptr<MultiFab>>& a_z_phys_nd
 }
 
 #endif
-

@@ -638,6 +638,11 @@ Ch & $f$ [GHz] & Ch & $f$ [GHz] \\
 All parameters use the \texttt{erf.*} ParmParse prefix.
 Multiple instrument sites can be specified by providing equal-length lists for
 \texttt{i\_loc} and \texttt{j\_loc}; indices are 0-based cell indices.
+All simulators optionally support moving columns using the same piecewise
+constant speed convention as moving refinement boxes:
+\texttt{move\_start\_time}, \texttt{move\_stop\_time},
+\texttt{move\_speed\_x}, and \texttt{move\_speed\_y}. Speeds are physical
+meters per second and are converted to the current sampled cell each output time.
 
 \begin{lstlisting}[language=bash,caption={Ceilometer input parameters (defaults shown)}]
 # Ceilometer (Vaisala CL-31, 905 nm)
@@ -650,6 +655,10 @@ erf.ceilometer.backscatter_model  = simple   # "simple" (geometric optics) or "m
 erf.ceilometer.r_eff_default      = 1.0e-5  # m; liquid effective radius fallback
 erf.ceilometer.r_eff_ice_default  = 3.0e-5  # m; ice effective radius fallback
 erf.ceilometer.beta_thresh        = 3.0e-4  # m-1 sr-1; cloud base detection threshold
+erf.ceilometer.move_start_time    = 60. 120.  # optional moving-column intervals
+erf.ceilometer.move_stop_time     = 120. 240.
+erf.ceilometer.move_speed_x       = -10. 0.   # m s-1
+erf.ceilometer.move_speed_y       = 0. -5.    # m s-1
 \end{lstlisting}
 
 \begin{lstlisting}[language=bash,caption={Doppler Lidar input parameters (defaults shown)}]
@@ -673,6 +682,10 @@ erf.doppler_lidar.optics_efficiency   = 0.1     # eta [-]
 erf.doppler_lidar.beam_radius         = 0.0225  # omega [m]  1/e^2 beam radius
 erf.doppler_lidar.bandwidth           = 50.0e6  # Bw  [Hz]  receiver bandwidth
 erf.doppler_lidar.focus_range         = 1.0e9   # R   [m]   (1e9 = collimated)
+erf.doppler_lidar.move_start_time     = 60. 120.  # optional moving-column intervals
+erf.doppler_lidar.move_stop_time      = 120. 240.
+erf.doppler_lidar.move_speed_x        = -10. 0.   # m s-1
+erf.doppler_lidar.move_speed_y        = 0. -5.    # m s-1
 \end{lstlisting}
 
 \begin{lstlisting}[language=bash,caption={MWR input parameters (defaults shown)}]
@@ -683,6 +696,10 @@ erf.mwr.j_loc              = 32      # REQUIRED
 erf.mwr.output_interval    = 10
 erf.mwr.output_file        = mwr_
 erf.mwr.do_brightness_temp = false   # true = also write simulated TB (35 channels)
+erf.mwr.move_start_time    = 60. 120.  # optional moving-column intervals
+erf.mwr.move_stop_time     = 120. 240.
+erf.mwr.move_speed_x       = -10. 0.   # m s-1
+erf.mwr.move_speed_y       = 0. -5.    # m s-1
 \end{lstlisting}
 
 % ============================================================
@@ -695,60 +712,68 @@ Time rows are appended at each write interval.
 \subsection{Ceilometer: \texttt{ceil\_XX.txt}}
 \begin{lstlisting}
 # ERF Ceilometer Simulator (Vaisala CL-31, 905 nm)
-# i_loc=32  j_loc=32
+# initial_i_loc=32  initial_j_loc=32
+# move_enabled=true
 # backscatter_model=simple
 # Col 1: time [s]
-# Col 2: height [m]
-# Col 3: att_backscatter [m-1 sr-1]
-# Col 4: cloud_base_height [m]  (-9999 = no cloud)
-  1.000000e+01  2.500000e+01  1.234000e-06  2.500000e+02
-  1.000000e+01  7.500000e+01  3.456000e-04  2.500000e+02
+# Col 2: x [m],  Col 3: y [m]
+# Col 4: i_loc,  Col 5: j_loc
+# Col 6: height [m]
+# Col 7: att_backscatter [m-1 sr-1]
+# Col 8: cloud_base_height [m]  (-9999 = no cloud)
+  1.000000e+01  3.250000e+03  3.250000e+03  32  32  2.500000e+01  1.234000e-06  2.500000e+02
 \end{lstlisting}
 
 \subsection{Doppler Lidar Stare: \texttt{dl\_XX\_stare.txt}}
 \begin{lstlisting}
 # ERF Doppler Lidar Simulator (Halo XR+, 1550 nm) -- vertical stare
-# i_loc=32  j_loc=32
+# initial_i_loc=32  initial_j_loc=32
+# move_enabled=true
 # cnr_model=normalized  (CNR = beta_att / r^2)
-# Col 1: time [s],  Col 2: height [m]
-# Col 3: w [m s-1],  Col 4: CNR [-]
-  1.000000e+01  2.500000e+01  1.230000e-01  4.560000e-03
+# Col 1: time [s],  Col 2: x [m],  Col 3: y [m]
+# Col 4: i_loc,  Col 5: j_loc,  Col 6: height [m]
+# Col 7: w [m s-1],  Col 8: CNR [-]
 \end{lstlisting}
 
 \subsection{Doppler Lidar VAD: \texttt{dl\_XX\_vad.txt}}
 \begin{lstlisting}
 # ERF Doppler Lidar Simulator -- VAD mode (elev=75.0 deg, 36 azimuths)
-# Col 1: time [s],  Col 2: height [m]
-# Col 3: u [m s-1],  Col 4: v [m s-1]
-# Col 5: wind_speed [m s-1],  Col 6: wind_dir [deg, met convention]
+# Col 1: time [s],  Col 2: x [m],  Col 3: y [m]
+# Col 4: i_loc,  Col 5: j_loc,  Col 6: height [m]
+# Col 7: u [m s-1],  Col 8: v [m s-1]
+# Col 9: wind_speed [m s-1],  Col 10: wind_dir [deg, met convention]
 \end{lstlisting}
 
 \subsection{Doppler Lidar Backscatter: \texttt{dl\_XX\_beta.txt}}
 \begin{lstlisting}
 # ERF Doppler Lidar Simulator -- att. backscatter (1550 nm)
-# Col 1: time [s],  Col 2: height [m],  Col 3: beta_att [m-1 sr-1]
+# Col 1: time [s],  Col 2: x [m],  Col 3: y [m]
+# Col 4: i_loc,  Col 5: j_loc,  Col 6: height [m]
+# Col 7: beta_att [m-1 sr-1]
 \end{lstlisting}
 
 \subsection{MWR Profiles: \texttt{mwr\_XX\_profiles.txt}}
 \begin{lstlisting}
 # ERF MWR Simulator (Radiometrics MP-3000A)
-# Col 1: time [s],  Col 2: height [m]
-# Col 3: T [K],  Col 4: qv [g kg-1],  Col 5: qc [g kg-1]
+# Col 1: time [s],  Col 2: x [m],  Col 3: y [m]
+# Col 4: i_loc,  Col 5: j_loc,  Col 6: height [m]
+# Col 7: T [K],  Col 8: qv [g kg-1],  Col 9: qc [g kg-1]
 \end{lstlisting}
 
 \subsection{MWR Column Integrals: \texttt{mwr\_XX\_column.txt}}
 \begin{lstlisting}
 # ERF MWR Simulator -- column integrals
-# Col 1: time [s],  Col 2: LWP [g m-2],  Col 3: PWV [mm]
-  1.000000e+01  2.534000e+01  1.872000e+01
+# Col 1: time [s],  Col 2: x [m],  Col 3: y [m]
+# Col 4: i_loc,  Col 5: j_loc
+# Col 6: LWP [g m-2],  Col 7: PWV [mm]
 \end{lstlisting}
 
 \subsection{MWR Brightness Temperatures: \texttt{mwr\_XX\_tb.txt} (optional)}
 \begin{lstlisting}
 # ERF MWR Simulator -- simulated brightness temperatures (35 channels)
-# Col 1: time [s],  Col 2: frequency [GHz],  Col 3: TB [K]
-  1.000000e+01  2.223500e+01  2.654300e+02
-  1.000000e+01  2.250000e+01  2.671200e+02
+# Col 1: time [s],  Col 2: x [m],  Col 3: y [m]
+# Col 4: i_loc,  Col 5: j_loc
+# Col 6: frequency [GHz],  Col 7: TB [K]
   ...  (35 rows per timestep)
 \end{lstlisting}
 
