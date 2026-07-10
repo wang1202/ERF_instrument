@@ -33,8 +33,8 @@ using namespace amrex;
 
 void make_sources (int level,
                    int /*nrk*/,
-                   Real dt,
-                   Real time,
+                   double dt,
+                   double time_d,
                    const Vector<MultiFab>& S_data,
                    const  MultiFab & S_prim,
                           MultiFab & source,
@@ -58,6 +58,8 @@ void make_sources (int level,
                    bool is_slow_step)
 {
     BL_PROFILE_REGION("erf_make_sources()");
+
+    Real time = static_cast<Real>(time_d);
 
     // *****************************************************************************
     // Initialize source to zero since we re-compute it every RK stage
@@ -429,7 +431,7 @@ void make_sources (int level,
         // *************************************************************************************
         // Real(7.) Add sponging
         // *************************************************************************************
-        if (!(solverChoice.spongeChoice.sponge_type == SpongeType::Input_Sponge) && is_slow_step){
+        if ( (solverChoice.spongeChoice.sponge_type != SpongeType::None) && is_slow_step) {
             const int n_qstate = S_data[IntVars::cons].nComp() - (NDRY + NSCALARS);
             ApplySpongeZoneBCsForCC(solverChoice.spongeChoice, geom, bx, cell_src, cell_data, r0, th0, qv0, z_cc_arr, n_qstate);
         }

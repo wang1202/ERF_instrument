@@ -148,7 +148,7 @@ void ComputeTurbulentViscosityLES (Vector<std::unique_ptr<MultiFab>>& Tau_lev,
                 }
 
                 Real dtheta_dz = myhalf * ( cell_data(i,j,k+1,RhoTheta_comp)/cell_data(i,j,k+1,Rho_comp)
-                                        - cell_data(i,j,k-1,RhoTheta_comp)/cell_data(i,j,k-1,Rho_comp) )*dzInv;
+                                          - cell_data(i,j,k-1,RhoTheta_comp)/cell_data(i,j,k-1,Rho_comp) )*dzInv;
 
                 hfx_x(i,j,k) = zero;
                 hfx_y(i,j,k) = zero;
@@ -300,8 +300,8 @@ void ComputeTurbulentViscosityLES (Vector<std::unique_ptr<MultiFab>>& Tau_lev,
 
         const Array4<Real>& mu_turb = eddyViscosity.array(mfi);
 
-        for (auto n = 1; n < (EddyDiff::NumDiffs-1)/2; ++n) {
-            int offset = (EddyDiff::NumDiffs-1)/2;
+        for (auto n = 1; n < EddyDiff::Mom_v; ++n) {
+            int offset = EddyDiff::Mom_v;
             switch (n)
             {
              case EddyDiff::KE_h:
@@ -519,8 +519,8 @@ void ComputeTurbulentViscosityLES_EB (Vector<std::unique_ptr<MultiFab>>& Tau_lev
 
         const Array4<Real>& mu_turb = eddyViscosity.array(mfi);
 
-        for (auto n = 1; n < (EddyDiff::NumDiffs-1)/2; ++n) {
-            int offset = (EddyDiff::NumDiffs-1)/2;
+        for (auto n = 1; n < EddyDiff::Mom_v; ++n) {
+            int offset = EddyDiff::Mom_v;
             switch (n)
             {
              case EddyDiff::KE_h:
@@ -637,7 +637,7 @@ void ComputeTurbulentViscosityRANS (Vector<std::unique_ptr<MultiFab>>& /*Tau_lev
                     dzInv /= Compute_h_zeta_AtCellCenter(i,j,k, cellSizeInv, z_nd_arr);
                 }
                 Real dtheta_dz = myhalf * ( cell_data(i,j,k+1,RhoTheta_comp)/cell_data(i,j,k+1,Rho_comp)
-                                       - cell_data(i,j,k-1,RhoTheta_comp)/cell_data(i,j,k-1,Rho_comp) )*dzInv;
+                                          - cell_data(i,j,k-1,RhoTheta_comp)/cell_data(i,j,k-1,Rho_comp) )*dzInv;
                 Real N2 = abs_g * inv_theta0 * dtheta_dz; // Brunt–Väisälä frequency squared
                 if (!use_ref_theta) {
                     // inv_theta0 == 1, divide by actual theta
@@ -736,8 +736,8 @@ void ComputeTurbulentViscosityRANS (Vector<std::unique_ptr<MultiFab>>& /*Tau_lev
 
         const Array4<Real>& mu_turb = eddyViscosity.array(mfi);
 
-        for (auto n = 1; n < (EddyDiff::NumDiffs-1)/2; ++n) {
-            int offset = (EddyDiff::NumDiffs-1)/2;
+        for (auto n = 1; n < EddyDiff::Mom_v; ++n) {
+            int offset = EddyDiff::Mom_v;
             switch (n)
             {
              case EddyDiff::KE_h:
@@ -788,7 +788,7 @@ void ComputeTurbulentViscosityRANS (Vector<std::unique_ptr<MultiFab>>& /*Tau_lev
  * @param[in]  most pointer to Monin-Obukhov class if instantiated
  * @param[in]  vert_only flag for vertical components of eddyViscosity
  */
-void ComputeTurbulentViscosity (Real dt,
+void ComputeTurbulentViscosity (double dt,
                                 const MultiFab& xvel, const MultiFab& yvel,
                                 Vector<std::unique_ptr<MultiFab>>& Tau_lev,
                                 MultiFab& cons_in,
@@ -893,7 +893,7 @@ void ComputeTurbulentViscosity (Real dt,
                               use_terrain_fitted_coords, use_moisture,
                               level, bc_ptr, vert_only, z_phys_nd,
                               solverChoice.moisture_indices);
-    } else if (turbChoice.pbl_type == PBLType::SHOC) {
+    } else if (turbChoice.uses_shoc_family()) {
         // NOTE: Nothing to do here. The SHOC class handles setting the vertical
         //       components of eddyDiffs in slow RHS pre.
     }

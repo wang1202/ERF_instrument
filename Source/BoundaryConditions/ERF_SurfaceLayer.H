@@ -13,6 +13,7 @@
 #include "ERF_MOSTAverage.H"
 #include "ERF_MOSTStress.H"
 #include "ERF_EBMOSTStress.H"
+#include "ERF_SurfaceDiagnosticSource.H"
 #include "ERF_TerrainMetrics.H"
 #include "ERF_PBLHeight.H"
 #include "ERF_MicrophysicsUtils.H"
@@ -42,9 +43,9 @@ public:
                          const MeshType& a_mesh_type,
                          const TerrainType& a_terrain_type,
                          const TurbChoice& a_turb_choice,
-                         amrex::Real start_low_time,
-                         amrex::Real final_low_time,
-                         amrex::Real low_time_interval = zero,
+                         double start_low_time,
+                         double final_low_time,
+                         double low_time_interval = 0.0,
                          const amrex::Vector<const eb_*>& eb_vec = {})
   : m_geom(geom),
     m_rotate(use_rot_surface_flux),
@@ -334,6 +335,7 @@ public:
           q_star.resize(nlevs);
           t_surf.resize(nlevs);
           q_surf.resize(nlevs);
+          surface_diagnostic_source.resize(nlevs);
           olen.resize(nlevs);
           pblh.resize(nlevs);
       }
@@ -463,6 +465,10 @@ public:
       q_surf[lev] = std::make_unique<amrex::MultiFab>(ba_flux, dm, ncomp, ng);
       q_surf[lev]->setVal(default_land_surf_moist);
 
+      surface_diagnostic_source[lev] = std::make_unique<amrex::MultiFab>(ba_flux, dm, ncomp, ng);
+      surface_diagnostic_source[lev]->setVal(
+          surface_diagnostics::to_plot_value(surface_diagnostics::SurfaceDiagnosticSource::Missing));
+
       // TODO: Do we want an enum struct for indexing?
 
       bool use_sst = (!m_sst_lev[lev].empty() && m_sst_lev[lev][0]);
@@ -499,8 +505,8 @@ public:
 
   void
   update_fluxes (const int& lev,
-                 const amrex::Real& elapsed_time,
-                 const amrex::Real& elapsed_time_since_start_low,
+                 const double& elapsed_time,
+                 const double& elapsed_time_since_start_low,
                  amrex::MultiFab& cons_in,
                  const std::unique_ptr<amrex::MultiFab>& z_phys_nd,
                  const std::unique_ptr<amrex::MultiFab>& walldist,
@@ -568,7 +574,7 @@ public:
                                           amrex::MultiFab& cons_in);
 
   void fill_tsurf_with_sst_and_tsk (const int& lev,
-                                    const amrex::Real& time);
+                                    const double& time);
 
   void fill_qsurf_with_qsat (const int& lev,
                              const amrex::MultiFab& cons_in,
@@ -592,7 +598,7 @@ public:
   void read_custom_roughness (const int& lev,
                               const std::string& fname);
 
-  void update_surf_temp (const amrex::Real& time)
+  void update_surf_temp (const double& time)
   {
       if (m_has_ocean_lsm_tsurf) {
           return;
@@ -600,7 +606,7 @@ public:
       if (surf_heating_rate != 0) {
           int nlevs = static_cast<int>(m_geom.size());
           for (int lev = 0; lev < nlevs; lev++) {
-              t_surf[lev]->setVal(surf_temp + surf_heating_rate * time);
+              t_surf[lev]->setVal(surf_temp + surf_heating_rate * static_cast<amrex::Real>(time));
               amrex::Print() << "Surface temp at t=" << time << ": "
                              << surf_temp + surf_heating_rate * time << std::endl;
           }
@@ -638,6 +644,8 @@ public:
 
   amrex::MultiFab* get_q_surf (const int& lev) { return q_surf[lev].get(); }
   void set_q_surf(const int& lev, const amrex::Real qsurf) { q_surf[lev]->setVal(qsurf); }
+
+  amrex::MultiFab* get_surface_diagnostic_source (const int& lev) { return surface_diagnostic_source[lev].get(); }
 
   amrex::Real get_zref (const int& lev) { return (m_ma.get_zref(lev))->min(0); }
 
@@ -717,9 +725,9 @@ private:
   // Set in constructor
   amrex::Vector<amrex::Geometry> m_geom;
   bool m_rotate = false;
-  amrex::Real m_start_low_time;
-  amrex::Real m_final_low_time;
-  amrex::Real m_low_time_interval;
+  double m_start_low_time;
+  double m_final_low_time;
+  double m_low_time_interval;
 
   bool m_include_wstar = false;
   amrex::Real z0_const{amrex::Real(0.1)};
@@ -767,6 +775,10 @@ private:
   amrex::Vector<std::unique_ptr<amrex::MultiFab>> pblh;
   amrex::Vector<std::unique_ptr<amrex::MultiFab>> t_surf;
   amrex::Vector<std::unique_ptr<amrex::MultiFab>> q_surf;
+  // Diagnostic-only provenance mask. This records the cell-centered source
+  // path used by the SurfaceLayer scalar diagnostic path. It must not feed
+  // back into flux calculations, boundary conditions, or model state.
+  amrex::Vector<std::unique_ptr<amrex::MultiFab>> surface_diagnostic_source;
 
   amrex::Vector<amrex::Vector<amrex::MultiFab*>>  m_sst_lev;
   amrex::Vector<amrex::Vector<amrex::MultiFab*>>  m_tsk_lev;

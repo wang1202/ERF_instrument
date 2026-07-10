@@ -8,6 +8,7 @@
 
 #include "ERF_Constants.H"
 #include "ERF_DataStruct.H"
+#include "ERF_NCPlotFile.H"
 #include "ERF_NCInterface.H"
 
 using namespace amrex;
@@ -21,8 +22,8 @@ writeNCPlotFile (int lev, int which_subdomain, const std::string& dir,
                  Array<Real,AMREX_SPACEDIM> prob_hi,
                  Array<Real,AMREX_SPACEDIM> dx_in,
                  const Box& subdomain,
-                 const Real time,
-                 const Real start_bdy_time,
+                 const double& time,
+                 const double& start_bdy_time,
                  const SolverChoice& solverChoice,
                  const Vector<Real>& zlevels_stag)
 {

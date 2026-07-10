@@ -7,7 +7,7 @@ AMREX_ENUM(LESType, None, Smagorinsky, Smagorinsky2D, Deardorff);
 
 AMREX_ENUM(RANSType, None, kEqn);
 
-AMREX_ENUM(PBLType, None, MYJ, MYNN25, MYNNEDMF, YSU, MRF, SHOC);
+AMREX_ENUM(PBLType, None, MYJ, MYNN25, MYNNEDMF, YSU, MRF, SHOC, EAMXX_SHOC, NATIVE_SHOC);
 
 AMREX_ENUM(StratType, theta, thetav, thetal);
 
@@ -102,7 +102,15 @@ public:
     }
 
     // Which PBL Closure
-    query_one_or_per_level(pp, "pbl_type", pbl_type, lev, max_level);
+    query_one_or_per_level_enum_case_insensitive(pp, "pbl_type", pbl_type, lev, max_level);
+    if (pbl_type == PBLType::SHOC) {
+      static bool warned_legacy_shoc = false;
+      if (!warned_legacy_shoc) {
+        amrex::Warning("erf.pbl_type = SHOC is deprecated; use erf.pbl_type = EAMXX_SHOC");
+        warned_legacy_shoc = true;
+      }
+      pbl_type = PBLType::EAMXX_SHOC;
+    }
 
     // Do some more stuff for PBL Modeling
     if (pbl_type != PBLType::None) {
@@ -170,15 +178,31 @@ public:
         query_one_or_per_level(pp, "pbl_mrf_sf", pbl_mrf_sf, lev, max_level);
         query_one_or_per_level(
           pp, "mrf_moistvars", mrf_moistvars, lev, max_level);
+        query_one_or_per_level(
+          pp, "enable_mrf_countergradient", enable_mrf_countergradient, lev, max_level);
+        query_one_or_per_level(
+          pp, "pbl_mrf_highres_bounds", pbl_mrf_highres_bounds, lev, max_level);
+        query_one_or_per_level(
+          pp, "enable_mrf_unbounded_vpert", enable_mrf_unbounded_vpert, lev, max_level);
+        query_one_or_per_level(
+          pp, "pbl_mrf_use_zero_ri_extent", pbl_mrf_use_zero_ri_extent, lev, max_level);
       } else if (pbl_type == PBLType::SHOC) {
 #ifndef ERF_USE_SHOC
           amrex::Abort("You set use_shoc to true but didn't build with SHOC; you must rebuild the executable");
+      }
 #endif
+      if (uses_eamxx_shoc()) {
+#ifndef ERF_USE_EAMXX_SHOC
+          amrex::Abort("PBLType::EAMXX_SHOC requested, but ERF was not built with ERF_ENABLE_EAMXX_SHOC=ON");
+#endif
+      }
+
+      if (pbl_requires_surface_layer()) {
           std::string zlo_bc = "none";
           amrex::ParmParse pp_bc("zlo");
           pp_bc.get("type",zlo_bc);
           if (amrex::toLower(zlo_bc) != "surface_layer") {
-               amrex::Abort("You must use the surface_layer BC at zlo with SHOC.");
+               amrex::Abort("You must use the surface_layer BC at zlo with the selected PBL.");
           }
       }
     }
@@ -253,7 +277,7 @@ public:
     use_tke =
       ((les_type == LESType::Deardorff) || (rans_type == RANSType::kEqn) ||
        (pbl_type == PBLType::MYJ)       || (pbl_type == PBLType::MYNN25) ||
-       (pbl_type == PBLType::MYNNEDMF)  || (pbl_type == PBLType::SHOC));
+       (pbl_type == PBLType::MYNNEDMF)  || uses_shoc_family());
 
     if (use_tke) {
         query_one_or_per_level(pp, "init_tke_from_ustar", init_tke_from_ustar, lev, max_level);
@@ -274,13 +298,9 @@ public:
   void check_params (amrex::GpuArray<ERF_BC, AMREX_SPACEDIM*2>& phys_bc_type)
   {
       // BC compatibility
-      if ( ( (pbl_type == PBLType::MYNN25)   ||
-             (pbl_type == PBLType::MYNNEDMF) ||
-             (pbl_type == PBLType::YSU) ||
-             (pbl_type == PBLType::MRF)
-                 ) &&
+      if (pbl_requires_surface_layer() &&
           phys_bc_type[amrex::Orientation(amrex::Direction::z,amrex::Orientation::low)] != ERF_BC::surface_layer ) {
-          amrex::Abort("MYNN2.5/MYNNEDMF/YSU/MRF PBL Model requires MOST at lower boundary");
+          amrex::Abort("The selected PBL model requires MOST at lower boundary");
       }
       if ( (les_type == LESType::Deardorff) && (Ce_wall > 0) &&
            (phys_bc_type[amrex::Orientation(amrex::Direction::z,amrex::Orientation::low)] != ERF_BC::surface_layer) &&
@@ -325,6 +345,10 @@ public:
       amrex::Print() << "    Using YSU PBL model at level " << lev << std::endl;
     } else if (pbl_type == PBLType::MRF) {
       amrex::Print() << "    Using MRF PBL model at level " << lev << std::endl;
+    } else if (pbl_type == PBLType::EAMXX_SHOC) {
+      amrex::Print() << "    Using EAMxx SHOC PBL model at level " << lev << std::endl;
+    } else if (pbl_type == PBLType::NATIVE_SHOC) {
+      amrex::Print() << "    Using native SHOC PBL model at level " << lev << std::endl;
     } else {
       amrex::Error("Unknown turbulence model");
     }
@@ -405,6 +429,14 @@ public:
                      << std::endl;
       amrex::Print() << "    mrf_moistvars         : " << mrf_moistvars
                      << std::endl;
+      amrex::Print() << "    enable_mrf_countergradient : " << enable_mrf_countergradient
+                     << std::endl;
+      amrex::Print() << "    pbl_mrf_highres_bounds     : " << pbl_mrf_highres_bounds
+                     << std::endl;
+      amrex::Print() << "    enable_mrf_unbounded_vpert : " << enable_mrf_unbounded_vpert
+                     << std::endl;
+      amrex::Print() << "    pbl_mrf_use_zero_ri_extent : " << pbl_mrf_use_zero_ri_extent
+                     << std::endl;
     }
   }
 
@@ -458,6 +490,35 @@ public:
   // PBL model
   PBLType pbl_type = PBLType::None;
 
+  bool uses_eamxx_shoc () const noexcept
+  {
+      return pbl_type == PBLType::EAMXX_SHOC;
+  }
+
+  bool uses_native_shoc () const noexcept
+  {
+      return pbl_type == PBLType::NATIVE_SHOC;
+  }
+
+  bool uses_shoc_family () const noexcept
+  {
+      return uses_eamxx_shoc() || uses_native_shoc();
+  }
+
+  bool pbl_requires_surface_layer () const noexcept
+  {
+      return (pbl_type == PBLType::MYNN25)   ||
+             (pbl_type == PBLType::MYNNEDMF) ||
+             (pbl_type == PBLType::YSU)      ||
+             (pbl_type == PBLType::MRF)       ||
+             uses_shoc_family();
+  }
+
+  bool pbl_suppresses_microphysics_condensation () const noexcept
+  {
+      return uses_shoc_family();
+  }
+
   MYNNLevel25 pbl_mynn;
   MYNNLevel2 pbl_mynn_level2; // limiting in the decaying turbulence regime
 
@@ -499,6 +560,10 @@ public:
   amrex::Real pbl_mrf_const_b = amrex::Real(7.8); // Constant b in MRF PBL model, used to compute the PBL height
   amrex::Real pbl_mrf_sf      = amrex::Real(0.1); // MRF surface flux, used to compute the PBL height
   bool mrf_moistvars = false; // if true, adds turbulence to moisture
+  bool enable_mrf_countergradient = false; // if true, apply WRF-style HGAMT/HGAMQ correction to PBL height
+  bool pbl_mrf_highres_bounds = false; // if true, apply high-resolution grid-dependent diffusivity bounds instead of global forecast bounds
+  bool enable_mrf_unbounded_vpert = false; // if true, does not limit VPERT to GAMCRT
+  bool pbl_mrf_use_zero_ri_extent = false; // if true, use Ri=0 (pbli_zero_arr) for K-profile extent; default false uses Ri=0.5 corrector (pbli_arr) for WRF compatibility
   // MYNN2.5 PBL model
   // TKE/QKE stuff
   bool advect_tke = true; // if MYNN2.5 PBL is used default is turb transport in

@@ -635,6 +635,19 @@ PlotFiles
 See :ref:`sec:Plotfiles` for how to control the types and frequency of plotfile
 generation.
 
+Boundary Files
+==============
+
++----------------------+------------------------------+-------------------+----------------------+
+| Parameter            | Definition                   | Acceptable Values | Default              |
++======================+==============================+===================+======================+
+| **erf.write_erfbdy** | Write AMReX-native format    | true / false      | true for non-restart |
+|                      | boundary file for real-data  |                   | real data cases,     |
+|                      | cases only                   |                   | otherwise false      |
++----------------------+------------------------------+-------------------+----------------------+
+| **erf.erfbdy_file**  | Name of the boundary file    | String            | "erfbdy"             |
++----------------------+------------------------------+-------------------+----------------------+
+
 Additional Plotfile Controls
 ----------------------------
 
@@ -1280,6 +1293,21 @@ List of Parameters
 |                                         | variables using    |                     |             |
 |                                         | modeled eddy       |                     |             |
 |                                         | diffusivity        |                     |             |
++-----------------------------------------+--------------------+---------------------+-------------+
+| **erf.enable_mrf_countergradient**      | Enable             | bool                | 0           |
+|                                         | countergradient    |                     |             |
+|                                         | correction terms   |                     |             |
+|                                         | in MRF PBL scheme  |                     |             |
++-----------------------------------------+--------------------+---------------------+-------------+
+| **erf.pbl_mrf_highres_bounds**         | Enable alternative | bool                | 0           |
+|                                         | high-resolution    |                     |             |
+|                                         | grid-dependent     |                     |             |
+|                                         | diffusivity bounds |                     |             |
++-----------------------------------------+--------------------+---------------------+-------------+
+| **erf.enable_mrf_unbounded_vpert**      | Enable physically  | bool                | 0           |
+|                                         | superior           |                     |             |
+|                                         | unbounded VPERT    |                     |             |
+|                                         | in MRF PBL scheme  |                     |             |
 +-----------------------------------------+--------------------+---------------------+-------------+
 
 Note that both PBL schemes must be used in conjunction with a MOST boundary condition

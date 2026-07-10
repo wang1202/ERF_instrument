@@ -4,15 +4,15 @@
                                  Vector<MultiFab>& S_old,
                                  Vector<MultiFab>& S_new,
                                  Vector<MultiFab>& S_data,
-                                 const Real old_step_time,
-                                 const Real old_stage_time,
-                                 const Real new_stage_time,
+                                 const double old_step_time,
+                                 const double old_stage_time,
+                                 const double new_stage_time,
                                  const int nrk)
     {
         // Note that the "old" and "new" metric terms correspond to
         // t^n and the RK stage (either t^*, t^** or t^{n+1} that this source
         // will be used to advance to
-        Real slow_dt = new_stage_time - old_step_time;
+        double slow_dt = new_stage_time - old_step_time;
 
         if (verbose) amrex::Print() << "Time integration of scalars at level " << level
                                     << std::setprecision(timeprecision)
@@ -47,9 +47,10 @@
                           fine_geom, solverChoice, m_SurfaceLayer, domain_bcs_type_d, domain_bcs_type,
                           z_phys_nd[level], z_phys_cc[level], ax[level], ay[level], az[level],
                           detJ_cc[level], new_detJ, stretched_dz_d[level], mapfac[level], EBFactory(level),
-#ifdef ERF_USE_SHOC
-                          shoc_interface[level],
+#ifdef ERF_USE_EAMXX_SHOC
+                          eamxx_shoc_interface[level].get(),
 #endif
+                          native_shoc_driver[level].get(),
                           fr_as_crse, fr_as_fine,
                           m_r2d);
 
@@ -121,11 +122,12 @@
                         } else if (ivar == RhoScalar_comp) {
                             num_comp = NSCALARS;
                         }
+                        Real sdt = static_cast<Real>(slow_dt);
                         ParallelFor(tbx, num_comp, [=] AMREX_GPU_DEVICE (int i, int j, int k, int nn)
                         {
                             if (detJ_arr(i,j,k) > zero) {
                                 const int n = start_comp + nn;
-                                snew(i,j,k,n) = sold(i,j,k,n) + slow_dt * srhs(i,j,k,n);
+                                snew(i,j,k,n) = sold(i,j,k,n) + sdt * srhs(i,j,k,n);
                             }
                         });
                     }

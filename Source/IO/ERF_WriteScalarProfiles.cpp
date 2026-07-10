@@ -219,10 +219,12 @@ ERF::sum_derived_quantities (double time)
 
         auto& dest1_fab = unwted_magvelsq[mfi];
         // NOTE: we send in src_fab where we should
-        derived::erf_dermagvelsq(bx, dest1_fab, 0, 1, src_fab, (*z_phys_cc[lev])[mfi], Geom(lev), t_new[0], nullptr, lev);
+        derived::erf_dermagvelsq(bx, dest1_fab, 0, 1, src_fab, (*z_phys_cc[lev])[mfi], Geom(lev),
+                                 static_cast<Real>(t_new[0]), nullptr, lev);
 
         auto& dest2_fab = enstrophysq[mfi];
-        derived::erf_derenstrophysq(bx, dest2_fab, 0, 1, src_fab, (*z_phys_cc[lev])[mfi], Geom(lev), t_new[0], nullptr, lev);
+        derived::erf_derenstrophysq(bx, dest2_fab, 0, 1, src_fab, (*z_phys_cc[lev])[mfi], Geom(lev),
+                                    static_cast<Real>(t_new[0]), nullptr, lev);
     }
 
     // Copy the MF holding 1/2(u^2 + v^2 + w^2) into the MF that will hold 1/2 rho (u^2 + v^2 + w^2)d
@@ -525,7 +527,7 @@ ERF::cloud_fraction (double /*time*/)
  * @param mf MultiFab from which we wish to sample data
  */
 void
-ERF::sample_points (int /*lev*/, Real time, IntVect cell, MultiFab& mf)
+ERF::sample_points (int /*lev*/, double time, IntVect cell, MultiFab& mf)
 {
     int ifile = 0;
 
@@ -561,7 +563,7 @@ ERF::sample_points (int /*lev*/, Real time, IntVect cell, MultiFab& mf)
  * @param mf MultiFab from which we sample the data
  */
 void
-ERF::sample_lines (int lev, Real time, IntVect cell, MultiFab& mf)
+ERF::sample_lines (int lev, double time, IntVect cell, MultiFab& mf)
 {
     int ifile = 0;
 
@@ -651,7 +653,7 @@ ERF::sample_lines (int lev, Real time, IntVect cell, MultiFab& mf)
  * @param action_per Interval in simulation time for taking action
  */
 bool
-ERF::is_it_time_for_action (int nstep, double time, Real dtlev, int action_interval, Real action_per)
+ERF::is_it_time_for_action (int nstep, double time, double dtlev, int action_interval, double action_per)
 {
   bool int_test = (action_interval > 0 && nstep % action_interval == 0);
 

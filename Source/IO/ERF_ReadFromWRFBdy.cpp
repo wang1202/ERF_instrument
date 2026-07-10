@@ -42,7 +42,7 @@ read_times_from_wrfbdy (const std::string& nc_bdy_file,
     // *******************************************************************************
 
     int ntimes;
-    Real timeInterval;
+    double timeInterval;
     const std::string dateTimeFormat = "%Y-%m-%d_%H:%M:%S";
 
     if (ParallelDescriptor::IOProcessor())
@@ -74,13 +74,13 @@ read_times_from_wrfbdy (const std::string& nc_bdy_file,
             epochTimes.push_back(epochTime);
 
             if (nt == 1) {
-                timeInterval = static_cast<Real>(epochTimes[1] - epochTimes[0]);
+                timeInterval = static_cast<double>(epochTimes[1] - epochTimes[0]);
             } else if (nt >= 1) {
-                AMREX_ALWAYS_ASSERT(static_cast<Real>(epochTimes[nt] - epochTimes[nt-1]) == timeInterval);
+                AMREX_ALWAYS_ASSERT(static_cast<double>(epochTimes[nt] - epochTimes[nt-1]) == timeInterval);
             }
         }
-        start_bdy_time = static_cast<Real>(epochTimes[0]);
-        final_bdy_time = static_cast<Real>(epochTimes[ntimes-1] + timeInterval);
+        start_bdy_time = static_cast<double>(epochTimes[0]);
+        final_bdy_time = static_cast<double>(epochTimes[ntimes-1]) + timeInterval;
         Print() << "  start_bdy_time " << start_bdy_time << std::endl;
         Print() << "  final_bdy_time " << final_bdy_time << std::endl;
     }
@@ -878,10 +878,11 @@ read_and_convert_from_wrfbdy (const int itime, const std::string& nc_bdy_file,
         for (int i = 0; i < n_per_time; i++)
         {
             // Multiply the tendency bdy_tend_prev (stored in bdy_data at itime) by dt to get difference between old and new
-            bdy_data_xlo[itime][i].template mult<RunOn::Device>(bdy_time_interval,0,1);
-            bdy_data_xhi[itime][i].template mult<RunOn::Device>(bdy_time_interval,0,1);
-            bdy_data_ylo[itime][i].template mult<RunOn::Device>(bdy_time_interval,0,1);
-            bdy_data_yhi[itime][i].template mult<RunOn::Device>(bdy_time_interval,0,1);
+            Real dT = static_cast<Real>(bdy_time_interval);
+            bdy_data_xlo[itime][i].template mult<RunOn::Device>(dT,0,1);
+            bdy_data_xhi[itime][i].template mult<RunOn::Device>(dT,0,1);
+            bdy_data_ylo[itime][i].template mult<RunOn::Device>(dT,0,1);
+            bdy_data_yhi[itime][i].template mult<RunOn::Device>(dT,0,1);
 
             // Add bdy_prev to dt*bdy_tend_prev to get bdy_current
             bdy_data_xlo[itime][i].template plus<RunOn::Device>(bdy_data_xlo[itime-1][i], 0, 0, 1);
